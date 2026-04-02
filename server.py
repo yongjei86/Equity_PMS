@@ -64,6 +64,51 @@ def prices():
     return jsonify(result)
 
 
+@app.route('/api/news/<path:ticker>')
+def news(ticker):
+    try:
+        t = yf.Ticker(ticker)
+        raw = t.news
+        if not raw:
+            return jsonify([])
+        articles = []
+        for item in raw[:10]:
+            content = item.get('content', {})
+            title = content.get('title') or item.get('title', '')
+            url = (content.get('canonicalUrl', {}) or {}).get('url') or \
+                  (content.get('clickThroughUrl', {}) or {}).get('url') or \
+                  item.get('link', '')
+            provider = (content.get('provider', {}) or {}).get('displayName') or \
+                       item.get('publisher', '')
+            pub_time = content.get('pubDate') or item.get('providerPublishTime')
+            if pub_time:
+                import datetime
+                try:
+                    if isinstance(pub_time, (int, float)):
+                        dt = datetime.datetime.fromtimestamp(pub_time)
+                    else:
+                        dt = datetime.datetime.fromisoformat(pub_time.replace('Z', '+00:00'))
+                    diff = datetime.datetime.now(datetime.timezone.utc) - dt.astimezone(datetime.timezone.utc)
+                    hours = int(diff.total_seconds() // 3600)
+                    time_str = f'{hours}시간 전' if hours < 24 else f'{hours // 24}일 전'
+                except Exception:
+                    time_str = ''
+            else:
+                time_str = ''
+            if title:
+                articles.append({
+                    'title': title,
+                    'titleOrig': title,
+                    'url': url,
+                    'source': provider,
+                    'time': time_str,
+                    'sentiment': 'neu',
+                })
+        return jsonify(articles)
+    except Exception as e:
+        return jsonify([])
+
+
 @app.route('/health')
 def health():
     return jsonify({'status': 'ok'})
