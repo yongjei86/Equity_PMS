@@ -106,7 +106,6 @@ nav{padding:12px 10px;flex:1}
 .dh-badge-down{background:var(--red-dim);color:var(--red)}
 .price-pair{display:flex;flex-direction:column;gap:1px;align-items:flex-end}
 .price-pair .local{font-size:11px;font-family:var(--font-mono)}
-.price-pair .krw{font-size:10px;color:var(--muted)}
 
 /* ── MAIN HOLDINGS TABLE ── */
 .table-wrap{overflow-x:auto}
@@ -452,7 +451,7 @@ tr:hover td{background:rgba(255,255,255,0.02)}
   <!-- ── HOLDINGS ── -->
   <div class="view" id="view-holdings">
     <div class="topbar">
-      <div><div class="page-title">보유 종목</div><div class="page-sub">원화(억원) 환산 · 거래내역 · 종목명 클릭 → 뉴스</div></div>
+      <div><div class="page-title">보유 종목</div><div class="page-sub">거래내역 · 종목명 클릭 → 뉴스</div></div>
       <div style="display:flex;gap:8px;align-items:center">
         <div class="search-wrap">
           <span class="search-icon">⌕</span>
@@ -468,10 +467,8 @@ tr:hover td{background:rgba(255,255,255,0.02)}
           <thead>
             <tr>
               <th>종목</th>
-              <th>현재가 (로컬)</th>
-              <th>현재가 (원)</th>
-              <th>매입가 (로컬)</th>
-              <th>매입가 (원)</th>
+              <th>현재가</th>
+              <th>매입가</th>
               <th>당일</th>
               <th>수량</th>
               <th>평가액 (억원)</th>
@@ -1147,8 +1144,7 @@ function renderDashHoldings() {
     const {pl,pct,mktKRW}=calcPL(h);
     const cur=h.current||h.avgPrice;
     const up=pl>=0, dayUp=h.changePct>=0, hasCur=h.current>0;
-    const curKRW=toKRW(cur,h.currency);
-    const avgKRW=toKRW(h.avgPrice,h.currency);
+
     return `<tr>
       <td>
         <div class="stock-link" onclick="openStockNews(${h.id})">
@@ -1156,18 +1152,8 @@ function renderDashHoldings() {
           <div class="dh-name">${h.name||h.ticker}</div>
         </div>
       </td>
-      <td>
-        <div class="price-pair">
-          <span class="local">${hasCur?fmtLocal(cur,h.currency):'—'}</span>
-          <span class="krw">${hasCur?fmtKRW(curKRW):'—'}</span>
-        </div>
-      </td>
-      <td>
-        <div class="price-pair">
-          <span class="local">${fmtLocal(h.avgPrice,h.currency)}</span>
-          <span class="krw">${fmtKRW(avgKRW)}</span>
-        </div>
-      </td>
+      <td>${hasCur?fmtLocal(cur,h.currency):'—'}</td>
+      <td>${fmtLocal(h.avgPrice,h.currency)}</td>
       <td>${hasCur?`<span class="${dayUp?'up':'down'}">${dayUp?'▲':'▼'}${Math.abs(h.changePct).toFixed(2)}%</span>`:'—'}</td>
       <td><span class="dh-badge ${up?'dh-badge-up':'dh-badge-down'}">${fmtPct(pct)}</span></td>
       <td class="${up?'up':'down'}">${up?'+':''}${fmtOk(Math.abs(pl))}</td>
@@ -1285,7 +1271,9 @@ function renderAlloc() {
 
 function renderHoldings(filter='') {
   const q=filter.toLowerCase();
-  const filtered=holdings.filter(h=>h.ticker.toLowerCase().includes(q)||(h.name||'').toLowerCase().includes(q));
+  const filtered=holdings
+    .filter(h=>h.ticker.toLowerCase().includes(q)||(h.name||'').toLowerCase().includes(q))
+    .sort((a,b)=>calcPL(b).mktKRW-calcPL(a).mktKRW);
   const body=document.getElementById('holdingsBody'),empty=document.getElementById('emptyHoldings');
   if(!filtered.length){body.innerHTML='';empty.style.display='';return;}
   empty.style.display='none';
@@ -1302,9 +1290,7 @@ function renderHoldings(filter='') {
         </div>
       </td>
       <td>${hasCur?fmtLocal(cur,h.currency):'—'}</td>
-      <td>${hasCur?fmtKRW(toKRW(cur,h.currency)):'—'}</td>
       <td>${fmtLocal(h.avgPrice,h.currency)}</td>
-      <td>${fmtKRW(toKRW(h.avgPrice,h.currency))}</td>
       <td>${hasCur?`<span class="${dayUp?'up':'down'}">${dayUp?'▲':'▼'}${Math.abs(h.changePct).toFixed(2)}%</span>`:'—'}</td>
       <td style="color:var(--muted)">${h.qty.toLocaleString()}</td>
       <td style="font-weight:500">${fmtOk(mktKRW)}</td>
