@@ -206,6 +206,8 @@ tr:hover td{background:rgba(255,255,255,0.02)}
 /* ── STATUS ── */
 .status-bar{position:fixed;bottom:20px;right:20px;background:var(--bg2);border:1px solid var(--border2);border-radius:var(--radius);padding:8px 14px;font-size:12px;color:var(--muted);display:flex;align-items:center;gap:8px;opacity:0;transition:opacity 0.3s;pointer-events:none;z-index:500}
 .status-bar.visible{opacity:1}
+.status-bar.error{border-color:var(--red);color:var(--red)}
+.status-bar.error .status-dot{background:var(--red)}
 .status-dot{width:7px;height:7px;border-radius:50%;background:var(--green)}
 
 /* ── SEARCH ── */
@@ -252,6 +254,7 @@ tr:hover td{background:rgba(255,255,255,0.02)}
       </svg>
       <span>가격 새로고침</span>
     </button>
+    <div id="autoRefreshCountdown" style="font-size:10px;color:var(--muted);text-align:center;margin-top:4px"></div>
     <div class="fx-badge">
       <div class="fx-dot"></div>
       <span>USD/KRW <strong id="fxRate">—</strong></span>
@@ -270,6 +273,17 @@ tr:hover td{background:rgba(255,255,255,0.02)}
     </div>
 
     <!-- Summary metrics -->
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+      <div class="tab-row" id="periodTabs" style="margin:0">
+        <button class="tab active" onclick="setMetricPeriod('1d',this)">1일</button>
+        <button class="tab" onclick="setMetricPeriod('1w',this)">1주</button>
+        <button class="tab" onclick="setMetricPeriod('1m',this)">1달</button>
+        <button class="tab" onclick="setMetricPeriod('3m',this)">분기</button>
+        <button class="tab" onclick="setMetricPeriod('ytd',this)">YTD</button>
+        <button class="tab" onclick="setMetricPeriod('cost',this)">원금</button>
+      </div>
+      <div id="periodLoading" style="font-size:11px;color:var(--muted);display:none">기간 데이터 로딩 중…</div>
+    </div>
     <div class="metrics" id="metrics"></div>
 
     <!-- Chart + Alloc -->
@@ -634,19 +648,54 @@ function calcPL(h) {
 // ══════════════════════════════════════════
 //  PRICE FETCH
 // ══════════════════════════════════════════
+// 로컬 백엔드 서버 주소 (server.py). 사용하지 않으려면 null로 설정.
+const BACKEND_URL = 'http://localhost:5000';
+
+function parseYahooResponse(j, ticker) {
+  if (!j.chart || !j.chart.result || !j.chart.result[0]) throw new Error('Invalid response');
+  const m = j.chart.result[0].meta;
+  const price = m.regularMarketPrice || m.previousClose;
+  const prev  = m.chartPreviousClose || m.previousClose;
+  const change = price - prev;
+  const changePct = prev ? (change/prev)*100 : 0;
+  return { price, change, changePct, name:m.longName||m.shortName||ticker, currency:(m.currency||'USD').toUpperCase(), ok:true };
+}
+
 async function fetchPrice(ticker) {
+  // 1순위: 로컬 백엔드 서버 (server.py)
+  if (BACKEND_URL) {
+    try {
+      const r = await fetch(`${BACKEND_URL}/api/price/${encodeURIComponent(ticker)}`);
+      if (r.ok) {
+        const j = await r.json();
+        if (j.ok) return j;
+      }
+    } catch(e) { /* 서버 미실행 시 다음으로 */ }
+  }
+
+  // 2순위: Yahoo Finance 직접 접근 (query1, query2)
+  const encoded = encodeURIComponent(ticker);
+  const params = 'interval=1d&range=2d';
+  for (const host of ['query1', 'query2']) {
+    try {
+      const r = await fetch(`https://${host}.finance.yahoo.com/v8/finance/chart/${encoded}?${params}`, { mode: 'cors', credentials: 'omit' });
+      if (!r.ok) continue;
+      const j = await r.json();
+      return parseYahooResponse(j, ticker);
+    } catch(e) { /* try next */ }
+  }
+
+  // 3순위: CORS 프록시
   try {
-    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}?interval=1d&range=2d`;
-    const r = await fetch(url,{mode:'cors'});
-    if (!r.ok) throw 0;
+    const proxyUrl = `https://corsproxy.io/?url=${encodeURIComponent(`https://query1.finance.yahoo.com/v8/finance/chart/${encoded}?${params}`)}`;
+    const r = await fetch(proxyUrl);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const j = await r.json();
-    const m = j.chart.result[0].meta;
-    const price = m.regularMarketPrice || m.previousClose;
-    const prev  = m.chartPreviousClose || m.previousClose;
-    const change = price - prev;
-    const changePct = prev ? (change/prev)*100 : 0;
-    return { price, change, changePct, name:m.longName||m.shortName||ticker, currency:(m.currency||'USD').toUpperCase(), ok:true };
-  } catch(e) { return { price:0, change:0, changePct:0, name:ticker, currency:'USD', ok:false }; }
+    return parseYahooResponse(j, ticker);
+  } catch(e) {
+    console.warn(`fetchPrice failed for ${ticker}:`, e);
+    return { price:0, change:0, changePct:0, name:ticker, currency:'USD', ok:false };
+  }
 }
 
 async function fetchFX() {
@@ -684,7 +733,14 @@ async function refreshAll() {
   renderAll();
   icon.classList.remove('spin');
   document.getElementById('lastUpdated').textContent='업데이트: '+new Date().toLocaleTimeString('ko-KR',{hour:'2-digit',minute:'2-digit'});
-  showStatus('가격 업데이트 완료');
+  const failedCount = Object.values(pm).filter(r => !r.ok).length;
+  if (failedCount > 0 && failedCount === Object.keys(pm).length) {
+    showStatus('가격 업데이트 실패 - Yahoo Finance API 연결을 확인하세요', true);
+  } else if (failedCount > 0) {
+    showStatus(`가격 업데이트 완료 (${failedCount}개 종목 실패)`);
+  } else {
+    showStatus('가격 업데이트 완료');
+  }
   // If stock news panel is open, refresh its prices too
   if (snewsStockId !== null) {
     const h=holdings.find(x=>x.id===snewsStockId);
@@ -697,15 +753,80 @@ async function refreshAll() {
 // ══════════════════════════════════════════
 function renderAll() { renderMetrics(); renderPerfChart('1M'); renderAlloc(); renderDashHoldings(); renderHoldings(); renderMovers(); }
 
+// ── PERIOD METRICS ──
+let metricPeriod = '1d';
+let periodStartPrices = {}; // { period: { ticker: startPrice } }
+
+const PERIOD_RANGE_MAP = { '1w':'5d', '1m':'1mo', '3m':'3mo', 'ytd':'ytd' };
+const PERIOD_LABEL = { '1d':'1일', '1w':'1주', '1m':'1달', '3m':'분기', 'ytd':'YTD', 'cost':'원금 대비' };
+
+async function fetchStartPrices(period) {
+  if (period === '1d' || period === 'cost') return {};
+  if (periodStartPrices[period]) return periodStartPrices[period];
+  const range = PERIOD_RANGE_MAP[period];
+  const tickers = [...new Set(holdings.map(h=>h.ticker))];
+  const results = {};
+  await Promise.all(tickers.map(async ticker=>{
+    // 1순위: 백엔드
+    if (BACKEND_URL) {
+      try {
+        const r = await fetch(`${BACKEND_URL}/api/history/${encodeURIComponent(ticker)}?range=${range}`);
+        if (r.ok) { const j=await r.json(); if(j.startPrice) { results[ticker]=j.startPrice; return; } }
+      } catch(e) {}
+    }
+    // 2순위: Yahoo Finance 직접
+    for (const host of ['query1','query2']) {
+      try {
+        const url=`https://${host}.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}?interval=1d&range=${range}`;
+        const r=await fetch(url,{mode:'cors',credentials:'omit'});
+        if (!r.ok) continue;
+        const j=await r.json();
+        const closes=j.chart?.result?.[0]?.indicators?.quote?.[0]?.close;
+        if (closes?.length) { results[ticker]=closes.find(c=>c!=null); return; }
+      } catch(e) {}
+    }
+  }));
+  periodStartPrices[period] = results;
+  return results;
+}
+
+async function setMetricPeriod(period, el) {
+  metricPeriod = period;
+  document.querySelectorAll('#periodTabs .tab').forEach(t=>t.classList.remove('active'));
+  el.classList.add('active');
+  if (period !== '1d' && period !== 'cost') {
+    document.getElementById('periodLoading').style.display='';
+    await fetchStartPrices(period);
+    document.getElementById('periodLoading').style.display='none';
+  }
+  renderMetrics();
+}
+
 function renderMetrics() {
-  let totalCost=0, totalMkt=0, dayGain=0;
-  holdings.forEach(h=>{ const {costKRW,mktKRW}=calcPL(h); totalCost+=costKRW; totalMkt+=mktKRW; if(h.change) dayGain+=toKRW(h.change*h.qty,h.currency); });
-  const pl=totalMkt-totalCost, pct=totalCost>0?(pl/totalCost)*100:0;
-  const up=pl>=0, dayUp=dayGain>=0;
+  let totalCost=0, totalMkt=0, periodGain=0, startValue=0;
+  const sp = periodStartPrices[metricPeriod] || {};
+  holdings.forEach(h=>{
+    const {costKRW,mktKRW}=calcPL(h);
+    totalCost+=costKRW; totalMkt+=mktKRW;
+    if (metricPeriod==='1d') {
+      if (h.change) periodGain+=toKRW(h.change*h.qty,h.currency);
+      startValue+=mktKRW-toKRW((h.change||0)*h.qty,h.currency);
+    } else if (metricPeriod==='cost') {
+      periodGain+=mktKRW-costKRW;
+      startValue+=costKRW;
+    } else {
+      const s=sp[h.ticker];
+      if (s && h.current) { periodGain+=toKRW((h.current-s)*h.qty,h.currency); startValue+=toKRW(s*h.qty,h.currency); }
+    }
+  });
+  const pct = startValue>0?(periodGain/startValue)*100:0;
+  const totalPl=totalMkt-totalCost, totalPct=totalCost>0?(totalPl/totalCost)*100:0;
+  const up=periodGain>=0, totalUp=totalPl>=0;
+  const label=PERIOD_LABEL[metricPeriod]||metricPeriod;
   document.getElementById('metrics').innerHTML=`
     <div class="metric"><div class="metric-label">총 평가액</div><div class="metric-value">${fmtOk(totalMkt)}</div><div class="metric-change neutral">${holdings.length}개 종목</div></div>
-    <div class="metric"><div class="metric-label">총 평가손익</div><div class="metric-value ${up?'up':'down'}">${up?'+':''}${fmtOk(Math.abs(pl))}</div><div class="metric-change ${up?'up':'down'}">${fmtPct(pct)}</div></div>
-    <div class="metric"><div class="metric-label">당일 손익</div><div class="metric-value ${dayUp?'up':'down'}">${dayUp?'+':''}${fmtOk(Math.abs(dayGain))}</div><div class="metric-change ${dayUp?'up':'down'}">${dayUp?'▲':'▼'} 오늘</div></div>
+    <div class="metric"><div class="metric-label">${label} 손익</div><div class="metric-value ${up?'up':'down'}">${up?'+':''}${fmtOk(Math.abs(periodGain))}</div><div class="metric-change ${up?'up':'down'}">${fmtPct(pct)}</div></div>
+    <div class="metric"><div class="metric-label">${label} 수익률</div><div class="metric-value ${up?'up':'down'}">${fmtPct(pct)}</div><div class="metric-change ${up?'up':'down'}">${up?'+':''}${fmtOk(Math.abs(periodGain))}</div></div>
     <div class="metric"><div class="metric-label">투자 원금</div><div class="metric-value">${fmtOk(totalCost)}</div><div class="metric-change neutral">환율 ${usdKrw.toLocaleString('ko-KR',{maximumFractionDigits:0})}원</div></div>`;
 }
 
@@ -909,7 +1030,24 @@ async function fetchStockNews(h) {
   const ticker = h.ticker.split('.')[0];
   const name = h.name || ticker;
 
-  // Build prompt for Claude to generate realistic news + translate
+  // 1순위: 백엔드 서버에서 실제 Yahoo Finance 뉴스 가져오기
+  if (BACKEND_URL) {
+    try {
+      const r = await fetch(`${BACKEND_URL}/api/news/${encodeURIComponent(ticker)}`);
+      if (r.ok) {
+        const articles = await r.json();
+        if (articles.length > 0) {
+          snewsArticles = articles;
+          renderSnewsNews();
+          // 번역은 별도로 처리
+          translateSnewsArticles(articles);
+          return;
+        }
+      }
+    } catch(e) { /* 서버 미실행 시 Claude로 폴백 */ }
+  }
+
+  // 2순위: Claude AI로 뉴스 생성
   const prompt = `당신은 ${name} (${ticker}) 관련 최신 금융 뉴스를 제공하는 어시스턴트입니다.
 아래 형식으로 이 종목과 관련된 최신 뉴스 헤드라인 8개와 간단한 요약을 JSON으로만 응답하세요 (다른 텍스트 없이).
 
@@ -960,8 +1098,10 @@ function renderSnewsNews() {
   const list = document.getElementById('snewsNewsList');
   list.style.display='';
   if (!snewsArticles.length) { list.innerHTML='<div class="snews-loading">관련 뉴스가 없습니다.</div>'; return; }
-  list.innerHTML = snewsArticles.map(a=>`
-    <div class="snews-news-item">
+  list.innerHTML = snewsArticles.map(a=>{
+    const href=(a.url&&a.url!=='#')?a.url:`https://www.google.com/search?q=${encodeURIComponent(a.titleOrig||a.title)}&tbm=nws`;
+    return `
+    <a class="snews-news-item" href="${href}" target="_blank" rel="noopener" style="text-decoration:none;color:inherit">
       <div>
         <div class="news-source">${a.source}</div>
         <div class="snews-news-title">${a.title}</div>
@@ -971,7 +1111,24 @@ function renderSnewsNews() {
         <div class="news-time">${a.time}</div>
         <div class="news-sentiment ${a.sentiment==='pos'?'sent-pos':a.sentiment==='neg'?'sent-neg':'sent-neu'}" style="margin-top:4px">${a.sentiment==='pos'?'긍정':a.sentiment==='neg'?'부정':'중립'}</div>
       </div>
-    </div>`).join('');
+    </a>`;
+  }).join('');
+}
+
+async function translateSnewsArticles(articles) {
+  const toTr = articles.filter(a => /^[A-Za-z]/.test(a.title));
+  if (!toTr.length) return;
+  const input = JSON.stringify(toTr.map((a, i) => ({i, t: a.title})));
+  const prompt = `다음 금융 뉴스 헤드라인을 자연스러운 한국어로 번역하세요. JSON 배열만 출력 (다른 텍스트 없이).\n입력: ${input}\n출력: [{"i":0,"ko":"..."}]`;
+  try {
+    const res = await fetch('https://api.anthropic.com/v1/messages', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:1000,messages:[{role:'user',content:prompt}]})});
+    const data = await res.json();
+    const raw = data.content?.find(c=>c.type==='text')?.text||'[]';
+    const parsed = JSON.parse(raw.replace(/```json|```/g,'').trim());
+    const map = {}; parsed.forEach(p=>map[p.i]=p.ko);
+    toTr.forEach((a, idx) => { if (map[idx]) { a.title = map[idx]; } });
+    renderSnewsNews();
+  } catch(e) { /* 번역 실패 시 원문 유지 */ }
 }
 
 function renderSnewsSummary() {
@@ -1062,16 +1219,21 @@ function filterNews(f,el){
   document.querySelectorAll('#view-news .tab-row .tab').forEach(t=>t.classList.remove('active'));
   el.classList.add('active');renderNews();
 }
+function newsLink(n) {
+  if (n.url && n.url !== '#') return n.url;
+  const q = encodeURIComponent(n.titleOrig || n.title);
+  return `https://www.google.com/search?q=${q}&tbm=nws`;
+}
 function renderNews(){
   const filtered=newsFilter==='all'?allNews:allNews.filter(n=>n.sentiment===newsFilter);
   document.getElementById('newsList').innerHTML=filtered.map(n=>`
-    <div class="news-item">
+    <a class="news-item" href="${newsLink(n)}" target="_blank" rel="noopener" style="text-decoration:none;color:inherit">
       <div><div class="news-source">${n.source}</div><div class="news-title">${n.titleKo||n.title}</div>${n.titleKo&&n.titleOrig?`<div class="news-orig">${n.titleOrig}</div>`:''}</div>
       <div style="text-align:right;flex-shrink:0">
         <div class="news-time">${n.time}</div>
         <div class="news-sentiment ${n.sentiment==='pos'?'sent-pos':n.sentiment==='neg'?'sent-neg':'sent-neu'}">${n.sentiment==='pos'?'긍정':n.sentiment==='neg'?'부정':'중립'}</div>
       </div>
-    </div>`).join('');
+    </a>`).join('');
 }
 function renderPortfolioNews(){
   const names=holdings.map(h=>(h.name||'').split(' ')[0]).filter(n=>n.length>2);
@@ -1079,10 +1241,10 @@ function renderPortfolioNews(){
   const related=allNews.filter(n=>{const t=(n.titleOrig||n.title).toLowerCase();return tickers.some(tk=>t.includes(tk))||names.some(nm=>t.includes(nm.toLowerCase()));});
   const show=related.length?related:allNews.slice(0,4);
   document.getElementById('portfolioNews').innerHTML=show.slice(0,5).map(n=>`
-    <div class="news-item">
+    <a class="news-item" href="${newsLink(n)}" target="_blank" rel="noopener" style="text-decoration:none;color:inherit">
       <div><div class="news-source">${n.source}</div><div class="news-title" style="font-size:12px">${n.titleKo||n.title}</div></div>
       <div><div class="news-time">${n.time}</div></div>
-    </div>`).join('');
+    </a>`).join('');
 }
 async function renderIndices(){
   const pairs=['^GSPC','^IXIC','^DJI','^KS11','^N225'];
@@ -1301,12 +1463,51 @@ function showView(name,el){
   if(name==='watchlist')renderWatchlist();
 }
 let stTimer;
-function showStatus(msg){
+function showStatus(msg, isError=false){
   const bar=document.getElementById('statusBar');
   document.getElementById('statusMsg').textContent=msg;
+  bar.classList.toggle('error', isError);
   bar.classList.add('visible');clearTimeout(stTimer);
-  stTimer=setTimeout(()=>bar.classList.remove('visible'),2500);
+  stTimer=setTimeout(()=>{ bar.classList.remove('visible'); bar.classList.remove('error'); }, isError ? 5000 : 2500);
 }
+
+// ══════════════════════════════════════════
+//  AUTO REFRESH
+// ══════════════════════════════════════════
+const AUTO_REFRESH_SEC = 5 * 60; // 5분
+let autoRefreshRemaining = AUTO_REFRESH_SEC;
+let autoRefreshTimer = null;
+let countdownTimer = null;
+
+function startAutoRefresh() {
+  clearInterval(autoRefreshTimer);
+  clearInterval(countdownTimer);
+  autoRefreshRemaining = AUTO_REFRESH_SEC;
+  updateCountdown();
+  countdownTimer = setInterval(() => {
+    autoRefreshRemaining--;
+    updateCountdown();
+    if (autoRefreshRemaining <= 0) {
+      autoRefreshRemaining = AUTO_REFRESH_SEC;
+      refreshAll();
+    }
+  }, 1000);
+}
+
+function updateCountdown() {
+  const el = document.getElementById('autoRefreshCountdown');
+  if (!el) return;
+  const m = Math.floor(autoRefreshRemaining / 60);
+  const s = autoRefreshRemaining % 60;
+  el.textContent = `자동 갱신 ${m}:${String(s).padStart(2,'0')}`;
+}
+
+// 수동 새로고침 시 카운트다운 초기화
+const _origRefreshAll = refreshAll;
+refreshAll = async function() {
+  autoRefreshRemaining = AUTO_REFRESH_SEC;
+  await _origRefreshAll();
+};
 
 // ══════════════════════════════════════════
 //  INIT
@@ -1314,6 +1515,7 @@ function showStatus(msg){
 document.getElementById('dashDate').textContent=new Date().toLocaleDateString('ko-KR',{year:'numeric',month:'long',day:'numeric',weekday:'long'});
 renderAll();
 refreshAll();
+startAutoRefresh();
 </script>
 </body>
 </html>
