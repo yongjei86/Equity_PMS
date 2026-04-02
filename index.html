@@ -995,9 +995,36 @@ function renderPerfChart(period) {
     ...benchmarks.map(b=>`<span style="display:flex;align-items:center;gap:4px"><span style="width:10px;height:2px;background:${b.color};display:inline-block;opacity:0.7"></span>${b.name}</span>`)
   ].join('');
   if(perfChartInst)perfChartInst.destroy();
-  perfChartInst=new Chart(document.getElementById('perfChart'),{type:'line',data:{labels,datasets},options:{responsive:true,maintainAspectRatio:false,interaction:{mode:'index',intersect:false},
-    plugins:{legend:{display:false},tooltip:{backgroundColor:'#1a1e29',borderColor:'rgba(255,255,255,0.1)',borderWidth:1,titleColor:'#9ca3af',bodyColor:'#e8eaf0',callbacks:{label:ctx=>` ${ctx.dataset.label}: ${ctx.raw.toFixed(1)}`}}},
-    scales:{x:{ticks:{maxTicksLimit:6,maxRotation:0,font:{size:10},color:'#6b7280'},grid:{color:'rgba(255,255,255,0.04)'}},y:{ticks:{font:{size:10},color:'#6b7280'},grid:{color:'rgba(255,255,255,0.04)'}}}}}});
+  perfChartInst = new Chart(document.getElementById('perfChart'), {
+    type:'line',
+    data:{ labels, datasets },
+    options:{
+      responsive:true,
+      maintainAspectRatio:false,
+      interaction:{ mode:'index', intersect:false },
+      plugins:{
+        legend:{ display:false },
+        tooltip:{
+          backgroundColor:'#1a1e29',
+          borderColor:'rgba(255,255,255,0.1)',
+          borderWidth:1,
+          titleColor:'#9ca3af',
+          bodyColor:'#e8eaf0',
+          callbacks:{ label:ctx=>` ${ctx.dataset.label}: ${ctx.raw.toFixed(1)}` }
+        }
+      },
+      scales:{
+        x:{
+          ticks:{ maxTicksLimit:6, maxRotation:0, font:{size:10}, color:'#6b7280' },
+          grid:{ color:'rgba(255,255,255,0.04)' }
+        },
+        y:{
+          ticks:{ font:{size:10}, color:'#6b7280' },
+          grid:{ color:'rgba(255,255,255,0.04)' }
+        }
+      }
+    }
+  });
 }
 function switchPeriod(p,el){document.querySelectorAll('#perfTabRow .tab').forEach(t=>t.classList.remove('active'));el.classList.add('active');renderPerfChart(p);}
 
