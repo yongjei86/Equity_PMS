@@ -636,6 +636,9 @@ function calcPL(h) {
 // ══════════════════════════════════════════
 //  PRICE FETCH
 // ══════════════════════════════════════════
+// 로컬 백엔드 서버 주소 (server.py). 사용하지 않으려면 null로 설정.
+const BACKEND_URL = 'http://localhost:5000';
+
 function parseYahooResponse(j, ticker) {
   if (!j.chart || !j.chart.result || !j.chart.result[0]) throw new Error('Invalid response');
   const m = j.chart.result[0].meta;
@@ -647,27 +650,32 @@ function parseYahooResponse(j, ticker) {
 }
 
 async function fetchPrice(ticker) {
+  // 1순위: 로컬 백엔드 서버 (server.py)
+  if (BACKEND_URL) {
+    try {
+      const r = await fetch(`${BACKEND_URL}/api/price/${encodeURIComponent(ticker)}`);
+      if (r.ok) {
+        const j = await r.json();
+        if (j.ok) return j;
+      }
+    } catch(e) { /* 서버 미실행 시 다음으로 */ }
+  }
+
+  // 2순위: Yahoo Finance 직접 접근 (query1, query2)
   const encoded = encodeURIComponent(ticker);
   const params = 'interval=1d&range=2d';
-  // Try direct endpoints first (query1, then query2)
-  const directUrls = [
-    `https://query1.finance.yahoo.com/v8/finance/chart/${encoded}?${params}`,
-    `https://query2.finance.yahoo.com/v8/finance/chart/${encoded}?${params}`,
-  ];
-  // CORS proxy fallback
-  const proxyUrl = `https://corsproxy.io/?url=${encodeURIComponent(`https://query1.finance.yahoo.com/v8/finance/chart/${encoded}?${params}`)}`;
-
-  for (const url of directUrls) {
+  for (const host of ['query1', 'query2']) {
     try {
-      const r = await fetch(url, { mode: 'cors', credentials: 'omit' });
+      const r = await fetch(`https://${host}.finance.yahoo.com/v8/finance/chart/${encoded}?${params}`, { mode: 'cors', credentials: 'omit' });
       if (!r.ok) continue;
       const j = await r.json();
       return parseYahooResponse(j, ticker);
     } catch(e) { /* try next */ }
   }
 
-  // Fallback: CORS proxy
+  // 3순위: CORS 프록시
   try {
+    const proxyUrl = `https://corsproxy.io/?url=${encodeURIComponent(`https://query1.finance.yahoo.com/v8/finance/chart/${encoded}?${params}`)}`;
     const r = await fetch(proxyUrl);
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const j = await r.json();
