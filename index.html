@@ -334,6 +334,13 @@ tr:hover td{background:rgba(255,255,255,0.02)}
     width:100%;
     max-height:none;
   }
+  /* 보유종목 테이블: 매입가(3), 수량(5), 평가손익(8), 수정/삭제(10) 숨김 */
+  #view-holdings .table-wrap{-webkit-overflow-scrolling:touch}
+  #view-holdings .table-wrap table{min-width:480px}
+  #view-holdings table th:nth-child(3),#view-holdings table td:nth-child(3),
+  #view-holdings table th:nth-child(5),#view-holdings table td:nth-child(5),
+  #view-holdings table th:nth-child(8),#view-holdings table td:nth-child(8),
+  #view-holdings table th:nth-child(10),#view-holdings table td:nth-child(10){display:none}
 }
 </style>
 </head>
