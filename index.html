@@ -257,6 +257,76 @@ tr:hover td{background:rgba(255,255,255,0.02)}
   .snews-panel,.trade-panel{width:100%}
   .metric-grid-3{grid-template-columns:1fr}
 }
+
+@media(max-width:768px){
+  .sidebar{
+    top:auto;
+    width:100%;
+    height:64px;
+    border-right:none;
+    border-top:1px solid var(--border);
+    flex-direction:row;
+    align-items:center;
+    justify-content:center;
+    padding:0 6px env(safe-area-inset-right) 6px;
+  }
+  .logo,.sidebar-footer{display:none}
+  nav{
+    width:100%;
+    padding:6px 0;
+    display:grid;
+    grid-template-columns:repeat(5,minmax(0,1fr));
+    gap:4px;
+  }
+  .nav-item{
+    flex-direction:column;
+    gap:2px;
+    justify-content:center;
+    padding:6px 4px;
+    min-height:50px;
+  }
+  .nav-item span{display:block}
+  .nav-item .nav-icon{
+    font-size:14px;
+    width:auto;
+    line-height:1;
+  }
+  .nav-item span:last-child{
+    font-size:10px;
+    white-space:nowrap;
+  }
+  .main{
+    margin-left:0;
+    padding:14px 12px calc(78px + env(safe-area-inset-bottom));
+  }
+  .topbar{
+    flex-direction:column;
+    align-items:stretch;
+    gap:10px;
+    margin-bottom:16px;
+  }
+  .topbar > div:last-child{
+    width:100%;
+    flex-wrap:wrap;
+  }
+  .page-title{font-size:18px}
+  .metrics{grid-template-columns:1fr}
+  .card{padding:14px}
+  .card-header{align-items:flex-start;gap:8px}
+  .search-input{width:100%}
+  .form-row,.form-row3{grid-template-columns:1fr}
+  .trade-row{grid-template-columns:70px 42px 72px 1fr auto}
+  .news-item,.snews-news-item{grid-template-columns:1fr}
+  .news-time{justify-self:start}
+  .snews-header,.snews-body,.trade-panel-header,.trade-panel-body{padding:14px}
+  .snews-prices{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+  .watchlist-grid{grid-template-columns:1fr}
+  #view-news > div[style*="grid-template-columns:1fr 300px"],
+  #view-risk .card div[style*="grid-template-columns:repeat(2,minmax(0,1fr))"]{
+    display:grid !important;
+    grid-template-columns:1fr !important;
+  }
+}
 </style>
 </head>
 <body>
