@@ -832,8 +832,21 @@ function calcPL(h) {
 // ══════════════════════════════════════════
 //  PRICE FETCH
 // ══════════════════════════════════════════
-// 로컬 백엔드 서버 주소 (server.py). 사용하지 않으려면 null로 설정.
-const BACKEND_URL = 'http://localhost:5000';
+// 백엔드 서버 주소 (server.py)
+// 기존 localhost 고정은 모바일에서 "자기 폰의 localhost"로 해석되어 동기화가 실패할 수 있음.
+function resolveBackendUrl() {
+  const custom = (window.localStorage.getItem('folio_backend_url') || '').trim();
+  if (custom) return custom.replace(/\/$/, '');
+
+  const { protocol, hostname } = window.location;
+  if (hostname) {
+    const safeProtocol = protocol === 'https:' ? 'https:' : 'http:';
+    return `${safeProtocol}//${hostname}:5000`;
+  }
+  return 'http://localhost:5000';
+}
+
+const BACKEND_URL = resolveBackendUrl();
 const PORTFOLIO_SYNC_KEY = 'default';
 
 function getStateSnapshot() {
