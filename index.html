@@ -1219,6 +1219,8 @@ async function fetchSp500StartPrice(rangeKey) {
 function calcSp500Return(periodKey) {
   if (periodKey === 'cost') return null;
   if (periodKey === '1d') {
+    const directPct = sp500Snapshot?.changePct;
+    if (Number.isFinite(directPct)) return directPct;
     const cur = sp500Snapshot?.price;
     if (!Number.isFinite(cur) || !Number.isFinite(dailyBenchmarkBasePrice) || dailyBenchmarkBasePrice <= 0) return null;
     return ((cur - dailyBenchmarkBasePrice) / dailyBenchmarkBasePrice) * 100;
@@ -1234,6 +1236,14 @@ function calcPeriodGain(period) {
   holdings.forEach(h=>{
     const {costKRW,mktKRW}=calcPL(h);
     if (period==='1d') {
+      if (Number.isFinite(h.change) && Number.isFinite(h.current)) {
+        const base = h.current - h.change;
+        if (base > 0) {
+          gain += toKRW(h.change * h.qty, h.currency);
+          startValue += toKRW(base * h.qty, h.currency);
+          return;
+        }
+      }
       const base = dailyBasePrices?.[h.ticker];
       if (Number.isFinite(base) && base > 0 && Number.isFinite(h.current)) {
         gain += toKRW((h.current - base) * h.qty, h.currency);
@@ -1266,6 +1276,7 @@ async function loadAllPeriods() {
   const el = document.getElementById('returnsStatus');
   el.textContent='조회 중…';
   await Promise.all([fetchSp500Snapshot(), fetchDailyBasePrices(), fetchSp500DailyBasePrice()]);
+  updateReturnsRow('1d');
   const asyncPeriods = ['1w','1m','3m','ytd'];
   for (const p of asyncPeriods) {
     await Promise.all([fetchStartPrices(p), fetchSp500StartPrice(p)]);
