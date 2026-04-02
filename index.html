@@ -687,7 +687,7 @@ tr:hover td{background:rgba(255,255,255,0.02)}
     <div class="form-group">
       <label class="form-label">티커 심볼</label>
       <div style="position:relative">
-        <input class="form-input" id="fTicker" autocomplete="off" placeholder="예: AAPL, 005930.KS, 9988.HK, 0700.HK, 600519.SS"/>
+        <input class="form-input" id="fTicker" autocomplete="off" placeholder="예: AAPL, 005930, 9988, 0700, 600519"/>
         <div class="ticker-suggest" id="tickerSuggest"></div>
       </div>
       <div class="fetch-hint" id="fetchHint">입력 후 가격 자동 조회됩니다</div>
@@ -1350,8 +1350,8 @@ function renderDashHoldings() {
     return `<tr>
       <td>
         <div class="stock-link" onclick="openStockNews(${h.id})">
-          <div class="dh-ticker">${h.ticker}</div>
-          <div class="dh-name">${h.name||h.ticker}</div>
+          <div class="dh-ticker">${dispTicker(h.ticker)}</div>
+          <div class="dh-name">${h.name||dispTicker(h.ticker)}</div>
         </div>
       </td>
       <td>${hasCur?fmtLocal(cur,h.currency):'—'}</td>
@@ -1440,6 +1440,7 @@ function switchAllocTab(tab, el) {
   renderAlloc();
 }
 
+function dispTicker(t) { return t ? t.replace(/\.[A-Z]{1,4}$/, '') : t; }
 function getCountry(ticker) {
   if (ticker.endsWith('.KS') || ticker.endsWith('.KQ')) return '한국';
   if (ticker.endsWith('.HK')) return '홍콩';
@@ -1487,8 +1488,8 @@ function renderHoldings(filter='') {
     return `<tr>
       <td>
         <div class="stock-link" onclick="openStockNews(${h.id})">
-          <div class="ticker-name">${h.ticker}</div>
-          <div class="co-name">${h.name||h.ticker} <span style="font-size:10px">${h.currency||'USD'}</span></div>
+          <div class="ticker-name">${dispTicker(h.ticker)}</div>
+          <div class="co-name">${h.name||dispTicker(h.ticker)} <span style="font-size:10px">${h.currency||'USD'}</span></div>
         </div>
       </td>
       <td>${hasCur?fmtLocal(cur,h.currency):'—'}</td>
@@ -1510,7 +1511,7 @@ function renderMovers() {
   document.getElementById('moversRow').innerHTML=sorted.length?sorted.map(h=>{
     const up=h.changePct>=0;
     return `<div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:12px 16px;min-width:140px;cursor:pointer" onclick="openStockNews(${h.id})">
-      <div style="font-family:var(--font-mono);font-weight:600;font-size:13px">${h.ticker}</div>
+      <div style="font-family:var(--font-mono);font-weight:600;font-size:13px">${dispTicker(h.ticker)}</div>
       <div style="font-size:11px;color:var(--muted);margin:2px 0 4px">${fmtLocal(h.current,h.currency)}</div>
       <div style="font-size:10px;color:var(--muted)">${fmtKRW(toKRW(h.current,h.currency))}</div>
       <div class="${up?'up':'down'}" style="font-size:12px;margin-top:4px">${up?'▲':'▼'} ${Math.abs(h.changePct).toFixed(2)}%</div>
@@ -1530,8 +1531,8 @@ async function openStockNews(holdingId) {
   snewsArticles = [];
   snewsSummary = '';
 
-  document.getElementById('snewsTicker').textContent = h.ticker;
-  document.getElementById('snewsName').textContent = h.name || h.ticker;
+  document.getElementById('snewsTicker').textContent = dispTicker(h.ticker);
+  document.getElementById('snewsName').textContent = h.name || dispTicker(h.ticker);
   renderSnewsPrices(h);
 
   // Reset tabs
@@ -1896,8 +1897,8 @@ async function addWatchItem(){
 function openTradePanel(holdingId){
   const h=holdings.find(x=>x.id===holdingId);if(!h)return;
   curTradeHoldingId=holdingId;
-  document.getElementById('tradePanelTitle').textContent=`${h.ticker} 거래내역`;
-  document.getElementById('tradePanelSub').textContent=`${h.name||h.ticker} · ${h.currency||'USD'}`;
+  document.getElementById('tradePanelTitle').textContent=`${dispTicker(h.ticker)} 거래내역`;
+  document.getElementById('tradePanelSub').textContent=`${h.name||dispTicker(h.ticker)} · ${h.currency||'USD'}`;
   document.getElementById('tDate').value=new Date().toISOString().slice(0,10);
   document.getElementById('tPrice').value='';document.getElementById('tQty').value='';document.getElementById('tMemo').value='';
   setTradeType('buy');renderTradeLog();
@@ -1972,11 +1973,14 @@ function closeTickerSuggest() {
   box.innerHTML = '';
 }
 function applyTickerSuggestion(item) {
-  document.getElementById('fTicker').value = item.symbol || '';
+  const fullSymbol = item.symbol || '';
+  const input = document.getElementById('fTicker');
+  input.value = dispTicker(fullSymbol);
+  input.dataset.full = fullSymbol;
   if (item.name) document.getElementById('fName').value = item.name;
   if (item.currency) document.getElementById('fCurrency').value = item.currency;
   closeTickerSuggest();
-  document.getElementById('fTicker').dispatchEvent(new Event('input'));
+  input.dispatchEvent(new Event('input'));
 }
 function renderTickerSuggestions(items) {
   const box = document.getElementById('tickerSuggest');
@@ -1997,7 +2001,9 @@ function openModal(id=null){
   document.getElementById('modalTitle').textContent=id?'종목 수정':'종목 추가';
   if(id){
     const h=holdings.find(x=>x.id===id);
-    document.getElementById('fTicker').value=h.ticker;
+    const tickerInput=document.getElementById('fTicker');
+    tickerInput.value=dispTicker(h.ticker);
+    tickerInput.dataset.full=h.ticker;
     document.getElementById('fName').value=h.name||'';
     document.getElementById('fPrice').value=h.avgPrice;
     document.getElementById('fQty').value=h.qty;
@@ -2007,6 +2013,7 @@ function openModal(id=null){
     document.getElementById('fetchHint').className='fetch-hint';
   } else {
     ['fTicker','fName','fPrice','fQty'].forEach(i=>document.getElementById(i).value='');
+    document.getElementById('fTicker').dataset.full='';
     document.getElementById('fCurrency').value='USD';
     document.getElementById('fSector').value='기술';
     document.getElementById('fetchHint').textContent='입력 후 가격 자동 조회됩니다';
@@ -2014,15 +2021,18 @@ function openModal(id=null){
   }
   document.getElementById('modalBackdrop').classList.add('open');
   closeTickerSuggest();
-  document.getElementById('fTicker').oninput=()=>{
+  document.getElementById('fTicker').oninput=(e)=>{
+    const el=document.getElementById('fTicker');
+    if(e.isTrusted) el.dataset.full='';
     clearTimeout(tickerTimeout);
-    const t=document.getElementById('fTicker').value.trim();
+    const t=el.value.trim();
     if(t.length<2){ closeTickerSuggest(); return; }
+    const apiTicker=el.dataset.full||t.toUpperCase();
     tickerTimeout=setTimeout(async()=>{
       const suggestions = await fetchTickerSuggestions(t);
       renderTickerSuggestions(suggestions);
       document.getElementById('fetchHint').textContent='조회 중...';
-      const r=await fetchPrice(t.toUpperCase());
+      const r=await fetchPrice(apiTicker);
       if(r.ok){
         document.getElementById('fCurrency').value=r.currency||'USD';
         document.getElementById('fetchHint').textContent=`현재가: ${fmtLocal(r.price,r.currency)} (${fmtPct(r.changePct)})`;
@@ -2039,7 +2049,8 @@ function openModal(id=null){
 function closeModal(){document.getElementById('modalBackdrop').classList.remove('open');editId=null;}
 function closeModalOutside(e){if(e.target===document.getElementById('modalBackdrop'))closeModal();}
 async function saveHolding(){
-  const ticker=document.getElementById('fTicker').value.trim().toUpperCase();
+  const _ti=document.getElementById('fTicker');
+  const ticker=(_ti.dataset.full||_ti.value.trim()).toUpperCase();
   const name=document.getElementById('fName').value.trim()||ticker;
   const avgPrice=parseFloat(document.getElementById('fPrice').value);
   const qty=parseFloat(document.getElementById('fQty').value);
