@@ -54,7 +54,16 @@ nav{padding:12px 10px;flex:1}
 .btn-primary:hover{background:#2563eb;border-color:#2563eb}
 
 /* ── METRICS ── */
-.metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;margin-bottom:24px}
+.metrics{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;margin-bottom:12px}
+/* ── RETURNS TABLE ── */
+.returns-table{width:100%;border-collapse:collapse}
+.returns-table th{text-align:left;padding:7px 12px;font-size:10px;text-transform:uppercase;letter-spacing:0.07em;color:var(--muted);font-weight:500;border-bottom:1px solid var(--border)}
+.returns-table th:not(:first-child){text-align:right}
+.returns-table td{padding:8px 12px;font-size:13px;border-bottom:1px solid var(--border);font-family:var(--font-mono)}
+.returns-table tr:last-child td{border-bottom:none}
+.returns-table td:first-child{font-family:var(--font-sans);color:var(--muted);font-size:11px;font-weight:500;text-transform:uppercase;letter-spacing:0.05em}
+.returns-table td:not(:first-child){text-align:right}
+.returns-loading{color:var(--muted);font-size:11px;font-style:italic}
 .metric{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius-lg);padding:18px;transition:border-color 0.15s}
 .metric:hover{border-color:var(--border2)}
 .metric-label{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:10px}
@@ -255,6 +264,7 @@ tr:hover td{background:rgba(255,255,255,0.02)}
       <span>가격 새로고침</span>
     </button>
     <div id="autoRefreshCountdown" style="font-size:10px;color:var(--muted);text-align:center;margin-top:4px"></div>
+    <button class="refresh-btn" onclick="openSettings()" style="margin-top:6px;opacity:0.7">⚙ 설정</button>
     <div class="fx-badge">
       <div class="fx-dot"></div>
       <span>USD/KRW <strong id="fxRate">—</strong></span>
@@ -273,35 +283,42 @@ tr:hover td{background:rgba(255,255,255,0.02)}
     </div>
 
     <!-- Summary metrics -->
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
-      <div class="tab-row" id="periodTabs" style="margin:0">
-        <button class="tab active" onclick="setMetricPeriod('1d',this)">1일</button>
-        <button class="tab" onclick="setMetricPeriod('1w',this)">1주</button>
-        <button class="tab" onclick="setMetricPeriod('1m',this)">1달</button>
-        <button class="tab" onclick="setMetricPeriod('3m',this)">분기</button>
-        <button class="tab" onclick="setMetricPeriod('ytd',this)">YTD</button>
-        <button class="tab" onclick="setMetricPeriod('cost',this)">원금</button>
-      </div>
-      <div id="periodLoading" style="font-size:11px;color:var(--muted);display:none">기간 데이터 로딩 중…</div>
-    </div>
     <div class="metrics" id="metrics"></div>
+    <!-- Period returns table -->
+    <div class="card" style="margin-bottom:16px">
+      <div class="card-header">
+        <span class="card-title">기간별 수익률</span>
+        <span class="card-sub" id="returnsStatus"></span>
+      </div>
+      <table class="returns-table"><thead><tr><th>기간</th><th>손익 (원화)</th><th>손익 (USD)</th><th>수익률</th></tr></thead><tbody id="returnsBody"></tbody></table>
+    </div>
 
     <!-- Chart + Alloc -->
     <div class="dash-grid">
       <div class="card">
         <div class="card-header">
           <span class="card-title">수익률 추이</span>
-          <div class="tab-row">
-            <button class="tab active" onclick="switchPeriod('1M',this)">1M</button>
-            <button class="tab" onclick="switchPeriod('3M',this)">3M</button>
-            <button class="tab" onclick="switchPeriod('6M',this)">6M</button>
-            <button class="tab" onclick="switchPeriod('1Y',this)">1Y</button>
+          <div style="display:flex;align-items:center;gap:8px">
+            <div class="tab-row" id="perfTabRow">
+              <button class="tab active" onclick="switchPeriod('1M',this)">1M</button>
+              <button class="tab" onclick="switchPeriod('3M',this)">3M</button>
+              <button class="tab" onclick="switchPeriod('6M',this)">6M</button>
+              <button class="tab" onclick="switchPeriod('1Y',this)">1Y</button>
+            </div>
+            <button class="icon-btn" onclick="openBenchmarkSettings()" title="벤치마크 설정" style="font-size:13px">⚙</button>
           </div>
         </div>
+        <div id="chartLegend" style="display:flex;gap:14px;margin-bottom:8px;font-size:11px;color:var(--muted)"></div>
         <div style="position:relative;height:200px"><canvas id="perfChart"></canvas></div>
       </div>
       <div class="card">
-        <div class="card-header"><span class="card-title">섹터 배분</span><span class="card-sub">원화 기준</span></div>
+        <div class="card-header">
+          <span class="card-title">자산 배분</span>
+          <div class="tab-row" id="allocTabRow">
+            <button class="tab active" onclick="switchAllocTab('sector',this)">섹터</button>
+            <button class="tab" onclick="switchAllocTab('country',this)">국가</button>
+          </div>
+        </div>
         <div style="position:relative;height:130px;margin-bottom:14px"><canvas id="allocChart"></canvas></div>
         <div class="alloc-list" id="allocList"></div>
       </div>
@@ -428,6 +445,32 @@ tr:hover td{background:rgba(255,255,255,0.02)}
 
 </main>
 
+<!-- ══ SETTINGS MODAL ══ -->
+<div class="modal-backdrop" id="settingsBackdrop" onclick="closeSettingsOutside(event)">
+  <div class="modal">
+    <h2>설정</h2>
+    <div class="form-group">
+      <label class="form-label">Claude API Key (뉴스 AI 분석용)</label>
+      <input class="form-input" id="sApiKey" type="password" placeholder="sk-ant-api03-..."/>
+      <div style="font-size:11px;color:var(--muted);margin-top:4px">뉴스 번역 및 AI 요약에 사용됩니다. <a href="https://console.anthropic.com" target="_blank" style="color:var(--accent2)">console.anthropic.com</a>에서 발급</div>
+    </div>
+    <div class="form-group">
+      <label class="form-label">벤치마크 지수</label>
+      <div id="benchmarkList" style="display:flex;flex-direction:column;gap:6px;margin-bottom:10px"></div>
+      <div class="form-row" style="align-items:center;gap:6px">
+        <input class="form-input" id="bTicker" placeholder="티커 (예: ^GSPC)" style="flex:1"/>
+        <input class="form-input" id="bName" placeholder="이름 (예: S&P 500)" style="flex:1"/>
+        <input type="color" id="bColor" value="#6b7280" style="width:34px;height:34px;border:1px solid var(--border);border-radius:6px;background:none;cursor:pointer;padding:2px"/>
+        <button class="btn" onclick="addBenchmark()">+ 추가</button>
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeSettings()">닫기</button>
+      <button class="btn btn-primary" onclick="saveSettings()">저장</button>
+    </div>
+  </div>
+</div>
+
 <!-- ══ STOCK NEWS PANEL ══ -->
 <div class="snews-overlay" id="snewsOverlay" onclick="closeStockNews()"></div>
 <div class="snews-panel" id="snewsPanel">
@@ -542,12 +585,14 @@ tr:hover td{background:rgba(255,255,255,0.02)}
         </select>
       </div>
       <div class="form-group">
-        <label class="form-label">섹터</label>
-        <select class="form-input" id="fSector">
-          <option>기술</option><option>금융</option><option>헬스케어</option>
-          <option>소비재</option><option>에너지</option><option>산업재</option>
-          <option>반도체</option><option>기타</option>
-        </select>
+        <label class="form-label">섹터 (직접 입력 가능)</label>
+        <input class="form-input" id="fSector" list="sectorDatalist" placeholder="예: 기술, 반도체, 금융"/>
+        <datalist id="sectorDatalist">
+          <option value="기술"/><option value="반도체"/><option value="금융"/>
+          <option value="헬스케어"/><option value="소비재"/><option value="에너지"/>
+          <option value="산업재"/><option value="부동산"/><option value="통신"/>
+          <option value="유틸리티"/><option value="암호화폐"/><option value="ETF"/><option value="기타"/>
+        </datalist>
       </div>
     </div>
     <div class="modal-actions">
@@ -590,6 +635,12 @@ if (!holdings) {
 }
 let trades = JSON.parse(localStorage.getItem('folio_t') || '{}');
 let watchlist = JSON.parse(localStorage.getItem('folio_w') || '["TSLA","BTC-USD","^IXIC"]');
+let appSettings = JSON.parse(localStorage.getItem('folio_settings') || '{}');
+// Default benchmarks
+if (!appSettings.benchmarks) appSettings.benchmarks = [
+  {ticker:'^GSPC', name:'S&P 500', color:'#6b7280'},
+  {ticker:'^KS11', name:'코스피', color:'#f59e0b'}
+];
 let usdKrw = 1360;
 let fxRates = { USD:1, KRW:1360, JPY:150, HKD:7.8, EUR:0.92, GBP:0.79 };
 let editId = null;
@@ -616,9 +667,16 @@ function toKRW(amount, currency) {
 }
 function toOk(krw) { return krw / 1e8; }
 function fmtOk(krw) {
-  const v = toOk(krw);
-  if (Math.abs(v) >= 100) return v.toLocaleString('ko-KR',{maximumFractionDigits:1})+'억';
-  return v.toLocaleString('ko-KR',{minimumFractionDigits:2,maximumFractionDigits:2})+'억';
+  const v = Math.round(krw / 1e8);
+  return v.toLocaleString('ko-KR') + '억원';
+}
+function fmtM(krw) {
+  // USD million 단위 (KRW → USD 변환 후)
+  const usd = krw / usdKrw;
+  const v = usd / 1e6;
+  if (Math.abs(v) >= 100) return '$' + Math.round(v).toLocaleString() + 'M';
+  if (Math.abs(v) >= 1) return '$' + v.toFixed(1) + 'M';
+  return '$' + (usd / 1000).toFixed(0) + 'K';
 }
 function fmtLocal(n, cur) {
   cur = (cur||'USD').toUpperCase();
@@ -751,30 +809,32 @@ async function refreshAll() {
 // ══════════════════════════════════════════
 //  RENDER ALL
 // ══════════════════════════════════════════
-function renderAll() { renderMetrics(); renderPerfChart('1M'); renderAlloc(); renderDashHoldings(); renderHoldings(); renderMovers(); }
+function renderAll() { renderMetrics(); renderPerfChart(curPeriod||'1M'); renderAlloc(); renderDashHoldings(); renderHoldings(); renderMovers(); }
 
-// ── PERIOD METRICS ──
-let metricPeriod = '1d';
-let periodStartPrices = {}; // { period: { ticker: startPrice } }
-
+// ── METRICS & PERIOD RETURNS TABLE ──
+let periodStartPrices = {}; // { rangeKey: { ticker: startPrice } }
 const PERIOD_RANGE_MAP = { '1w':'5d', '1m':'1mo', '3m':'3mo', 'ytd':'ytd' };
-const PERIOD_LABEL = { '1d':'1일', '1w':'1주', '1m':'1달', '3m':'분기', 'ytd':'YTD', 'cost':'원금 대비' };
+const PERIODS = [
+  {key:'1d', label:'1일'},
+  {key:'1w', label:'1주'},
+  {key:'1m', label:'1달'},
+  {key:'3m', label:'분기'},
+  {key:'ytd', label:'YTD'},
+  {key:'cost', label:'원금 대비'},
+];
 
-async function fetchStartPrices(period) {
-  if (period === '1d' || period === 'cost') return {};
-  if (periodStartPrices[period]) return periodStartPrices[period];
-  const range = PERIOD_RANGE_MAP[period];
+async function fetchStartPrices(rangeKey) {
+  if (periodStartPrices[rangeKey]) return periodStartPrices[rangeKey];
+  const range = PERIOD_RANGE_MAP[rangeKey];
   const tickers = [...new Set(holdings.map(h=>h.ticker))];
   const results = {};
   await Promise.all(tickers.map(async ticker=>{
-    // 1순위: 백엔드
     if (BACKEND_URL) {
       try {
         const r = await fetch(`${BACKEND_URL}/api/history/${encodeURIComponent(ticker)}?range=${range}`);
         if (r.ok) { const j=await r.json(); if(j.startPrice) { results[ticker]=j.startPrice; return; } }
       } catch(e) {}
     }
-    // 2순위: Yahoo Finance 직접
     for (const host of ['query1','query2']) {
       try {
         const url=`https://${host}.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}?interval=1d&range=${range}`;
@@ -786,48 +846,77 @@ async function fetchStartPrices(period) {
       } catch(e) {}
     }
   }));
-  periodStartPrices[period] = results;
+  periodStartPrices[rangeKey] = results;
   return results;
 }
 
-async function setMetricPeriod(period, el) {
-  metricPeriod = period;
-  document.querySelectorAll('#periodTabs .tab').forEach(t=>t.classList.remove('active'));
-  el.classList.add('active');
-  if (period !== '1d' && period !== 'cost') {
-    document.getElementById('periodLoading').style.display='';
-    await fetchStartPrices(period);
-    document.getElementById('periodLoading').style.display='none';
-  }
-  renderMetrics();
+function calcPeriodGain(period) {
+  let gain=0, startValue=0;
+  holdings.forEach(h=>{
+    const {costKRW,mktKRW}=calcPL(h);
+    if (period==='1d') {
+      if (h.change) gain+=toKRW(h.change*h.qty,h.currency);
+      startValue+=mktKRW-toKRW((h.change||0)*h.qty,h.currency);
+    } else if (period==='cost') {
+      gain+=mktKRW-costKRW; startValue+=costKRW;
+    } else {
+      const sp=periodStartPrices[period]||{};
+      const s=sp[h.ticker];
+      if (s&&h.current) { gain+=toKRW((h.current-s)*h.qty,h.currency); startValue+=toKRW(s*h.qty,h.currency); }
+    }
+  });
+  const pct=startValue>0?(gain/startValue)*100:null;
+  return {gain, pct, hasData: period==='1d'||period==='cost'||(periodStartPrices[period]&&Object.keys(periodStartPrices[period]).length>0)};
 }
 
 function renderMetrics() {
-  let totalCost=0, totalMkt=0, periodGain=0, startValue=0;
-  const sp = periodStartPrices[metricPeriod] || {};
-  holdings.forEach(h=>{
-    const {costKRW,mktKRW}=calcPL(h);
-    totalCost+=costKRW; totalMkt+=mktKRW;
-    if (metricPeriod==='1d') {
-      if (h.change) periodGain+=toKRW(h.change*h.qty,h.currency);
-      startValue+=mktKRW-toKRW((h.change||0)*h.qty,h.currency);
-    } else if (metricPeriod==='cost') {
-      periodGain+=mktKRW-costKRW;
-      startValue+=costKRW;
-    } else {
-      const s=sp[h.ticker];
-      if (s && h.current) { periodGain+=toKRW((h.current-s)*h.qty,h.currency); startValue+=toKRW(s*h.qty,h.currency); }
-    }
-  });
-  const pct = startValue>0?(periodGain/startValue)*100:0;
-  const totalPl=totalMkt-totalCost, totalPct=totalCost>0?(totalPl/totalCost)*100:0;
-  const up=periodGain>=0, totalUp=totalPl>=0;
-  const label=PERIOD_LABEL[metricPeriod]||metricPeriod;
+  let totalCost=0, totalMkt=0;
+  holdings.forEach(h=>{ const {costKRW,mktKRW}=calcPL(h); totalCost+=costKRW; totalMkt+=mktKRW; });
   document.getElementById('metrics').innerHTML=`
-    <div class="metric"><div class="metric-label">총 평가액</div><div class="metric-value">${fmtOk(totalMkt)}</div><div class="metric-change neutral">${holdings.length}개 종목</div></div>
-    <div class="metric"><div class="metric-label">${label} 손익</div><div class="metric-value ${up?'up':'down'}">${up?'+':''}${fmtOk(Math.abs(periodGain))}</div><div class="metric-change ${up?'up':'down'}">${fmtPct(pct)}</div></div>
-    <div class="metric"><div class="metric-label">${label} 수익률</div><div class="metric-value ${up?'up':'down'}">${fmtPct(pct)}</div><div class="metric-change ${up?'up':'down'}">${up?'+':''}${fmtOk(Math.abs(periodGain))}</div></div>
-    <div class="metric"><div class="metric-label">투자 원금</div><div class="metric-value">${fmtOk(totalCost)}</div><div class="metric-change neutral">환율 ${usdKrw.toLocaleString('ko-KR',{maximumFractionDigits:0})}원</div></div>`;
+    <div class="metric"><div class="metric-label">총 평가액</div><div class="metric-value">${fmtOk(totalMkt)}</div><div class="metric-change neutral">${holdings.length}개 종목 · ${fmtM(totalMkt)}</div></div>
+    <div class="metric"><div class="metric-label">투자 원금</div><div class="metric-value">${fmtOk(totalCost)}</div><div class="metric-change neutral">환율 ${usdKrw.toLocaleString('ko-KR',{maximumFractionDigits:0})}원 · ${fmtM(totalCost)}</div></div>`;
+  renderReturnsTable();
+  loadAllPeriods();
+}
+
+async function loadAllPeriods() {
+  const el = document.getElementById('returnsStatus');
+  el.textContent='조회 중…';
+  const asyncPeriods = ['1w','1m','3m','ytd'];
+  for (const p of asyncPeriods) {
+    await fetchStartPrices(p);
+    updateReturnsRow(p);
+  }
+  el.textContent='';
+}
+
+function renderReturnsTable() {
+  document.getElementById('returnsBody').innerHTML = PERIODS.map(p=>{
+    const {gain,pct,hasData}=calcPeriodGain(p.key);
+    return returnsRowHTML(p.label, gain, pct, hasData);
+  }).join('');
+}
+
+function updateReturnsRow(periodKey) {
+  const p = PERIODS.find(x=>x.key===periodKey);
+  if (!p) return;
+  const rows = document.getElementById('returnsBody').querySelectorAll('tr');
+  const idx = PERIODS.indexOf(p);
+  if (!rows[idx]) return;
+  const {gain,pct}=calcPeriodGain(p.key);
+  rows[idx].innerHTML = returnsRowCells(p.label, gain, pct, true);
+}
+
+function returnsRowHTML(label, gain, pct, hasData) {
+  return `<tr>${returnsRowCells(label, gain, pct, hasData)}</tr>`;
+}
+
+function returnsRowCells(label, gain, pct, hasData) {
+  if (!hasData || pct===null) {
+    return `<td>${label}</td><td class="returns-loading">조회 중…</td><td class="returns-loading">—</td><td class="returns-loading">—</td>`;
+  }
+  const up=gain>=0, cls=up?'up':'down';
+  return `<td>${label}</td><td class="${cls}">${up?'+':''}${fmtOk(Math.abs(gain))}</td><td class="${cls}">${up?'+':''}${fmtM(Math.abs(gain))}</td><td class="${cls}" style="font-weight:600">${fmtPct(pct||0)}</td>`;
 }
 
 // ── DASHBOARD HOLDINGS TABLE ──
@@ -872,44 +961,79 @@ function renderDashHoldings() {
 }
 
 function generatePerf(period) {
-  const pts={1:30,'1M':30,'3M':90,'6M':180,'1Y':365}[period]||30;
-  const labels=[],portfolio=[],bench=[];
-  let pv=100,bv=100,drift=0.08;
+  const pts={'1M':30,'3M':90,'6M':180,'1Y':365}[period]||30;
+  const labels=[],portfolio=[];
+  let pv=100,drift=0.08;
   if(holdings.length){let c=0,m=0;holdings.forEach(h=>{const p=calcPL(h);c+=p.costKRW;m+=p.mktKRW;});drift=c>0?(m-c)/c*100/pts:0.08;}
+  const benchmarks=appSettings.benchmarks||[];
+  const bvArr=benchmarks.map(()=>100);
+  const benchData=benchmarks.map(()=>[]);
   const now=new Date();
   for(let i=pts;i>=0;i--){
     const d=new Date(now);d.setDate(d.getDate()-i);
     if(d.getDay()===0||d.getDay()===6) continue;
     labels.push(d.toLocaleDateString('ko-KR',{month:'short',day:'numeric'}));
-    pv+=drift+(Math.random()-0.48)*1.4;bv+=(Math.random()-0.47)*1.0;
-    portfolio.push(+pv.toFixed(2));bench.push(+bv.toFixed(2));
+    pv+=drift+(Math.random()-0.48)*1.4;
+    portfolio.push(+pv.toFixed(2));
+    benchmarks.forEach((_,bi)=>{ bvArr[bi]+=(Math.random()-0.47)*1.0; benchData[bi].push(+bvArr[bi].toFixed(2)); });
   }
-  return{labels,portfolio,bench};
+  return{labels,portfolio,benchData};
 }
 
 let curPeriod='1M';
 function renderPerfChart(period) {
   curPeriod=period;
-  const{labels,portfolio,bench}=generatePerf(period);
-  if(perfChartInst)perfChartInst.destroy();
-  perfChartInst=new Chart(document.getElementById('perfChart'),{type:'line',data:{labels,datasets:[
+  const{labels,portfolio,benchData}=generatePerf(period);
+  const benchmarks = appSettings.benchmarks||[];
+  const datasets=[
     {label:'내 포트폴리오',data:portfolio,borderColor:'#3b82f6',borderWidth:2,pointRadius:0,tension:0.4,fill:true,backgroundColor:'rgba(59,130,246,0.07)'},
-    {label:'S&P 500',data:bench,borderColor:'#6b7280',borderWidth:1.5,borderDash:[5,4],pointRadius:0,tension:0.4,fill:false}
-  ]},options:{responsive:true,maintainAspectRatio:false,interaction:{mode:'index',intersect:false},
+    ...benchmarks.map((b,i)=>({label:b.name,data:benchData[i]||[],borderColor:b.color,borderWidth:1.5,borderDash:[5,4],pointRadius:0,tension:0.4,fill:false}))
+  ];
+  // Legend
+  document.getElementById('chartLegend').innerHTML=[
+    `<span style="display:flex;align-items:center;gap:4px"><span style="width:10px;height:2px;background:#3b82f6;display:inline-block"></span>내 포트폴리오</span>`,
+    ...benchmarks.map(b=>`<span style="display:flex;align-items:center;gap:4px"><span style="width:10px;height:2px;background:${b.color};display:inline-block;opacity:0.7"></span>${b.name}</span>`)
+  ].join('');
+  if(perfChartInst)perfChartInst.destroy();
+  perfChartInst=new Chart(document.getElementById('perfChart'),{type:'line',data:{labels,datasets},options:{responsive:true,maintainAspectRatio:false,interaction:{mode:'index',intersect:false},
     plugins:{legend:{display:false},tooltip:{backgroundColor:'#1a1e29',borderColor:'rgba(255,255,255,0.1)',borderWidth:1,titleColor:'#9ca3af',bodyColor:'#e8eaf0',callbacks:{label:ctx=>` ${ctx.dataset.label}: ${ctx.raw.toFixed(1)}`}}},
-    scales:{x:{ticks:{maxTicksLimit:6,maxRotation:0,font:{size:10},color:'#6b7280'},grid:{color:'rgba(255,255,255,0.04)'}},y:{ticks:{font:{size:10},color:'#6b7280'},grid:{color:'rgba(255,255,255,0.04)'}}}}});
+    scales:{x:{ticks:{maxTicksLimit:6,maxRotation:0,font:{size:10},color:'#6b7280'},grid:{color:'rgba(255,255,255,0.04)'}},y:{ticks:{font:{size:10},color:'#6b7280'},grid:{color:'rgba(255,255,255,0.04)'}}}}}});
 }
-function switchPeriod(p,el){document.querySelectorAll('.tab-row .tab').forEach(t=>t.classList.remove('active'));el.classList.add('active');renderPerfChart(p);}
+function switchPeriod(p,el){document.querySelectorAll('#perfTabRow .tab').forEach(t=>t.classList.remove('active'));el.classList.add('active');renderPerfChart(p);}
+
+let allocTab = 'sector';
+function switchAllocTab(tab, el) {
+  allocTab = tab;
+  document.querySelectorAll('#allocTabRow .tab').forEach(t=>t.classList.remove('active'));
+  el.classList.add('active');
+  renderAlloc();
+}
+
+function getCountry(ticker) {
+  if (ticker.endsWith('.KS') || ticker.endsWith('.KQ')) return '한국';
+  if (ticker.endsWith('.HK')) return '홍콩';
+  if (ticker.endsWith('.T'))  return '일본';
+  if (ticker.endsWith('.L'))  return '영국';
+  if (ticker.endsWith('.PA') || ticker.endsWith('.DE') || ticker.endsWith('.MI')) return '유럽';
+  if (ticker.endsWith('.SS') || ticker.endsWith('.SZ')) return '중국';
+  if (/^(BTC|ETH|SOL|XRP|ADA|DOGE|AVAX|DOT)/.test(ticker)) return '암호화폐';
+  if (ticker.startsWith('^')) return '지수';
+  return '미국';
+}
 
 function renderAlloc() {
-  const sm={};let total=0;
-  holdings.forEach(h=>{const mv=calcPL(h).mktKRW;sm[h.sector]=(sm[h.sector]||0)+mv;total+=mv;});
-  const sectors=Object.entries(sm).sort((a,b)=>b[1]-a[1]);
-  if(!sectors.length)return;
+  const map={};let total=0;
+  holdings.forEach(h=>{
+    const mv=calcPL(h).mktKRW;
+    const key = allocTab==='country' ? getCountry(h.ticker) : (h.sector||'기타');
+    map[key]=(map[key]||0)+mv; total+=mv;
+  });
+  const items=Object.entries(map).sort((a,b)=>b[1]-a[1]);
+  if(!items.length)return;
   if(allocChartInst)allocChartInst.destroy();
-  allocChartInst=new Chart(document.getElementById('allocChart'),{type:'doughnut',data:{labels:sectors.map(s=>s[0]),datasets:[{data:sectors.map(s=>s[1]),backgroundColor:COLORS.slice(0,sectors.length),borderWidth:0,hoverOffset:6}]},
+  allocChartInst=new Chart(document.getElementById('allocChart'),{type:'doughnut',data:{labels:items.map(s=>s[0]),datasets:[{data:items.map(s=>s[1]),backgroundColor:COLORS.slice(0,items.length),borderWidth:0,hoverOffset:6}]},
     options:{responsive:true,maintainAspectRatio:false,cutout:'72%',plugins:{legend:{display:false},tooltip:{backgroundColor:'#1a1e29',bodyColor:'#e8eaf0',callbacks:{label:ctx=>` ${ctx.label}: ${(ctx.raw/total*100).toFixed(1)}%`}}}}});
-  document.getElementById('allocList').innerHTML=sectors.map((s,i)=>`
+  document.getElementById('allocList').innerHTML=items.map((s,i)=>`
     <div class="alloc-item"><div class="alloc-row">
       <span style="display:flex;align-items:center;gap:6px;font-size:12px"><span style="width:7px;height:7px;border-radius:50%;background:${COLORS[i]};flex-shrink:0"></span>${s[0]}</span>
       <span style="font-size:12px;color:var(--muted)">${(s[1]/total*100).toFixed(1)}%</span>
@@ -1070,10 +1194,15 @@ async function fetchStockNews(h) {
 - source는 Reuters, Bloomberg, WSJ, FT, CNBC, 연합뉴스, 한국경제 등 실제 언론사명
 - sentiment는 실제 뉴스 내용에 맞게 판단`;
 
+  const apiKey = appSettings.claudeApiKey;
+  if (!apiKey) {
+    document.getElementById('snewsLoading').innerHTML = `<div style="color:var(--muted);font-size:13px">AI 뉴스 분석을 사용하려면 사이드바 하단 <b>⚙ 설정</b>에서 Claude API Key를 입력하세요.</div>`;
+    return;
+  }
   try {
     const res = await fetch('https://api.anthropic.com/v1/messages', {
       method:'POST',
-      headers:{'Content-Type':'application/json'},
+      headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
       body:JSON.stringify({
         model:'claude-sonnet-4-20250514',
         max_tokens:1200,
@@ -1089,7 +1218,7 @@ async function fetchStockNews(h) {
     renderSnewsNews();
     if (snewsActiveTab === 'summary') renderSnewsSummary();
   } catch(e) {
-    document.getElementById('snewsLoading').innerHTML = `<div style="color:var(--muted);font-size:13px">${name} 관련 뉴스를 불러올 수 없습니다.<br><span style="font-size:11px;margin-top:4px;display:block">Claude API 연결을 확인하세요.</span></div>`;
+    document.getElementById('snewsLoading').innerHTML = `<div style="color:var(--muted);font-size:13px">${name} 뉴스를 불러올 수 없습니다.<br><span style="font-size:11px;margin-top:4px;display:block">API 키 또는 네트워크를 확인하세요.</span></div>`;
   }
 }
 
@@ -1121,7 +1250,7 @@ async function translateSnewsArticles(articles) {
   const input = JSON.stringify(toTr.map((a, i) => ({i, t: a.title})));
   const prompt = `다음 금융 뉴스 헤드라인을 자연스러운 한국어로 번역하세요. JSON 배열만 출력 (다른 텍스트 없이).\n입력: ${input}\n출력: [{"i":0,"ko":"..."}]`;
   try {
-    const res = await fetch('https://api.anthropic.com/v1/messages', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:1000,messages:[{role:'user',content:prompt}]})});
+    const res = await fetch('https://api.anthropic.com/v1/messages', {method:'POST',headers:{'Content-Type':'application/json','x-api-key':appSettings.claudeApiKey||'','anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:1000,messages:[{role:'user',content:prompt}]})});
     const data = await res.json();
     const raw = data.content?.find(c=>c.type==='text')?.text||'[]';
     const parsed = JSON.parse(raw.replace(/```json|```/g,'').trim());
@@ -1444,7 +1573,7 @@ function saveData(){localStorage.setItem('folio_h',JSON.stringify(holdings));}
 function saveTrades(){localStorage.setItem('folio_t',JSON.stringify(trades));}
 function exportCSV(){
   const rows=[['티커','종목명','섹터','통화','평균단가','수량','현재가','평가액(억원)','평가손익(억원)','수익률(%)']];
-  holdings.forEach(h=>{const{pl,pct,mktKRW}=calcPL(h);rows.push([h.ticker,h.name||h.ticker,h.sector,h.currency||'USD',h.avgPrice,h.qty,h.current||0,toOk(mktKRW).toFixed(4),toOk(pl).toFixed(4),pct.toFixed(2)]);});
+  holdings.forEach(h=>{const{pl,pct,mktKRW}=calcPL(h);rows.push([h.ticker,h.name||h.ticker,h.sector,h.currency||'USD',h.avgPrice,h.qty,h.current||0,(mktKRW/1e8).toFixed(4),(pl/1e8).toFixed(4),pct.toFixed(2)]);});
   const a=document.createElement('a');
   a.href=URL.createObjectURL(new Blob(['\uFEFF'+rows.map(r=>r.join(',')).join('\n')],{type:'text/csv;charset=utf-8;'}));
   a.download='포트폴리오_'+new Date().toISOString().slice(0,10)+'.csv';
@@ -1470,6 +1599,54 @@ function showStatus(msg, isError=false){
   bar.classList.add('visible');clearTimeout(stTimer);
   stTimer=setTimeout(()=>{ bar.classList.remove('visible'); bar.classList.remove('error'); }, isError ? 5000 : 2500);
 }
+
+// ══════════════════════════════════════════
+//  SETTINGS & BENCHMARK
+// ══════════════════════════════════════════
+function openSettings() {
+  document.getElementById('sApiKey').value = appSettings.claudeApiKey || '';
+  renderBenchmarkList();
+  document.getElementById('settingsBackdrop').classList.add('open');
+}
+function closeSettings() { document.getElementById('settingsBackdrop').classList.remove('open'); }
+function closeSettingsOutside(e) { if(e.target===document.getElementById('settingsBackdrop')) closeSettings(); }
+
+function saveSettings() {
+  appSettings.claudeApiKey = document.getElementById('sApiKey').value.trim();
+  localStorage.setItem('folio_settings', JSON.stringify(appSettings));
+  closeSettings();
+  renderPerfChart(curPeriod);
+  showStatus('설정이 저장되었습니다');
+}
+
+function renderBenchmarkList() {
+  const list = document.getElementById('benchmarkList');
+  list.innerHTML = (appSettings.benchmarks||[]).map((b,i)=>`
+    <div style="display:flex;align-items:center;gap:8px;padding:6px 8px;background:var(--bg3);border-radius:6px">
+      <span style="width:10px;height:10px;border-radius:50%;background:${b.color};flex-shrink:0"></span>
+      <span style="flex:1;font-size:12px">${b.name} <span style="color:var(--muted)">(${b.ticker})</span></span>
+      <button class="icon-btn" onclick="removeBenchmark(${i})" style="font-size:11px">삭제</button>
+    </div>`).join('');
+}
+
+function addBenchmark() {
+  const ticker = document.getElementById('bTicker').value.trim().toUpperCase();
+  const name = document.getElementById('bName').value.trim() || ticker;
+  const color = document.getElementById('bColor').value;
+  if (!ticker) return;
+  if (!appSettings.benchmarks) appSettings.benchmarks = [];
+  appSettings.benchmarks.push({ticker, name, color});
+  document.getElementById('bTicker').value='';
+  document.getElementById('bName').value='';
+  renderBenchmarkList();
+}
+
+function removeBenchmark(i) {
+  appSettings.benchmarks.splice(i,1);
+  renderBenchmarkList();
+}
+
+function openBenchmarkSettings() { openSettings(); }
 
 // ══════════════════════════════════════════
 //  AUTO REFRESH
