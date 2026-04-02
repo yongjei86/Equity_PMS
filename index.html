@@ -960,7 +960,13 @@ function renderAll() { renderMetrics(); renderPerfChart(curPeriod||'1M'); render
 // ── METRICS & PERIOD RETURNS TABLE ──
 let periodStartPrices = {}; // { rangeKey: { ticker: startPrice } }
 let benchmarkStartPrices = {}; // { rangeKey: startPrice }
+let dailyBasePrices = null; // { ticker: baseCloseBeforeCurrentKSTTradingDay }
+let dailyBaseTradingDate = null;
+let dailyBenchmarkBasePrice = null;
+let dailyBenchmarkTradingDate = null;
 let sp500Snapshot = null;
+const KST_OFFSET_MS = 9 * 60 * 60 * 1000;
+const KST_CUTOFF_HOUR = 9; // 한국 개장 기준
 const PERIOD_RANGE_MAP = { '1w':'5d', '1m':'1mo', '3m':'3mo', 'ytd':'ytd' };
 const PERIODS = [
   {key:'1d', label:'1일'},
@@ -1020,6 +1026,103 @@ async function fetchSp500Snapshot() {
   return sp500Snapshot;
 }
 
+
+function toKstDateParts(date = new Date()) {
+  const kst = new Date(date.getTime() + KST_OFFSET_MS);
+  return {
+    year: kst.getUTCFullYear(),
+    month: kst.getUTCMonth() + 1,
+    day: kst.getUTCDate(),
+    hour: kst.getUTCHours(),
+  };
+}
+
+function formatYmd(parts) {
+  return `${parts.year}-${String(parts.month).padStart(2,'0')}-${String(parts.day).padStart(2,'0')}`;
+}
+
+function activeKstTradingDateStr() {
+  const now = new Date();
+  const parts = toKstDateParts(now);
+  if (parts.hour >= KST_CUTOFF_HOUR) return formatYmd(parts);
+  const prev = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+  return formatYmd(toKstDateParts(prev));
+}
+
+function labeledTradingDateFromTs(timestampSec) {
+  const d = new Date(timestampSec * 1000 + KST_OFFSET_MS);
+  let year = d.getUTCFullYear();
+  let month = d.getUTCMonth() + 1;
+  let day = d.getUTCDate();
+  const hour = d.getUTCHours();
+  if (hour < KST_CUTOFF_HOUR) {
+    const prev = new Date((timestampSec * 1000) - 24 * 60 * 60 * 1000 + KST_OFFSET_MS);
+    year = prev.getUTCFullYear();
+    month = prev.getUTCMonth() + 1;
+    day = prev.getUTCDate();
+  }
+  return `${year}-${String(month).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
+}
+
+function extractDailyBaseFromChart(chartResult, tradingDateStr) {
+  const timestamps = chartResult?.timestamp || [];
+  const closes = chartResult?.indicators?.quote?.[0]?.close || [];
+  let best = null;
+  for (let i=0; i<Math.min(timestamps.length, closes.length); i++) {
+    const c = closes[i];
+    if (!Number.isFinite(c)) continue;
+    const label = labeledTradingDateFromTs(timestamps[i]);
+    if (label < tradingDateStr) best = c;
+  }
+  return best;
+}
+
+async function fetchDailyBasePrices() {
+  const tickers = [...new Set(holdings.map(h=>h.ticker))];
+  const tradingDateStr = activeKstTradingDateStr();
+  if (dailyBasePrices && dailyBaseTradingDate === tradingDateStr) return dailyBasePrices;
+  const results = {};
+  await Promise.all(tickers.map(async ticker => {
+    for (const host of ['query1','query2']) {
+      try {
+        const url = `https://${host}.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}?interval=1d&range=1mo`;
+        const r = await fetch(url,{mode:'cors',credentials:'omit'});
+        if (!r.ok) continue;
+        const j = await r.json();
+        const chart = j.chart?.result?.[0];
+        const base = extractDailyBaseFromChart(chart, tradingDateStr);
+        if (Number.isFinite(base)) { results[ticker] = base; return; }
+      } catch(e) {}
+    }
+  }));
+  dailyBasePrices = results;
+  dailyBaseTradingDate = tradingDateStr;
+  return results;
+}
+
+async function fetchSp500DailyBasePrice() {
+  const tradingDateStr = activeKstTradingDateStr();
+  if (Number.isFinite(dailyBenchmarkBasePrice) && dailyBenchmarkTradingDate === tradingDateStr) return dailyBenchmarkBasePrice;
+  for (const host of ['query1','query2']) {
+    try {
+      const url = `https://${host}.finance.yahoo.com/v8/finance/chart/${encodeURIComponent('^GSPC')}?interval=1d&range=1mo`;
+      const r = await fetch(url,{mode:'cors',credentials:'omit'});
+      if (!r.ok) continue;
+      const j = await r.json();
+      const chart = j.chart?.result?.[0];
+      const base = extractDailyBaseFromChart(chart, tradingDateStr);
+      if (Number.isFinite(base)) {
+        dailyBenchmarkBasePrice = base;
+        dailyBenchmarkTradingDate = tradingDateStr;
+        return base;
+      }
+    } catch(e) {}
+  }
+  dailyBenchmarkBasePrice = null;
+  dailyBenchmarkTradingDate = tradingDateStr;
+  return null;
+}
+
 async function fetchSp500StartPrice(rangeKey) {
   if (benchmarkStartPrices[rangeKey]) return benchmarkStartPrices[rangeKey];
   const range = PERIOD_RANGE_MAP[rangeKey];
@@ -1057,7 +1160,11 @@ async function fetchSp500StartPrice(rangeKey) {
 
 function calcSp500Return(periodKey) {
   if (periodKey === 'cost') return null;
-  if (periodKey === '1d') return Number.isFinite(sp500Snapshot?.changePct) ? sp500Snapshot.changePct : null;
+  if (periodKey === '1d') {
+    const cur = sp500Snapshot?.price;
+    if (!Number.isFinite(cur) || !Number.isFinite(dailyBenchmarkBasePrice) || dailyBenchmarkBasePrice <= 0) return null;
+    return ((cur - dailyBenchmarkBasePrice) / dailyBenchmarkBasePrice) * 100;
+  }
   const start = benchmarkStartPrices[periodKey];
   const cur = sp500Snapshot?.price;
   if (!start || !cur) return null;
@@ -1069,8 +1176,11 @@ function calcPeriodGain(period) {
   holdings.forEach(h=>{
     const {costKRW,mktKRW}=calcPL(h);
     if (period==='1d') {
-      if (h.change) gain+=toKRW(h.change*h.qty,h.currency);
-      startValue+=mktKRW-toKRW((h.change||0)*h.qty,h.currency);
+      const base = dailyBasePrices?.[h.ticker];
+      if (Number.isFinite(base) && base > 0 && Number.isFinite(h.current)) {
+        gain += toKRW((h.current - base) * h.qty, h.currency);
+        startValue += toKRW(base * h.qty, h.currency);
+      }
     } else if (period==='cost') {
       gain+=mktKRW-costKRW; startValue+=costKRW;
     } else {
@@ -1080,7 +1190,8 @@ function calcPeriodGain(period) {
     }
   });
   const pct=startValue>0?(gain/startValue)*100:null;
-  return {gain, pct, hasData: period==='1d'||period==='cost'||(periodStartPrices[period]&&Object.keys(periodStartPrices[period]).length>0)};
+  const has1dData = period === '1d' ? startValue > 0 : false;
+  return {gain, pct, hasData: has1dData||period==='cost'||(periodStartPrices[period]&&Object.keys(periodStartPrices[period]).length>0)};
 }
 
 function renderMetrics() {
@@ -1096,7 +1207,7 @@ function renderMetrics() {
 async function loadAllPeriods() {
   const el = document.getElementById('returnsStatus');
   el.textContent='조회 중…';
-  await fetchSp500Snapshot();
+  await Promise.all([fetchSp500Snapshot(), fetchDailyBasePrices(), fetchSp500DailyBasePrice()]);
   const asyncPeriods = ['1w','1m','3m','ytd'];
   for (const p of asyncPeriods) {
     await Promise.all([fetchStartPrices(p), fetchSp500StartPrice(p)]);
