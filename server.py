@@ -51,22 +51,30 @@ def calculate_portfolio_metrics(tickers, weights=None, period='1y', benchmark='^
     if not tickers:
         return {'error': '최소 1개 이상의 티커가 필요합니다.'}, 400
 
-    clean_tickers = [str(t).strip().upper() for t in tickers if str(t).strip()]
-    if not clean_tickers:
+    raw_tickers = [str(t).strip().upper() for t in tickers if str(t).strip()]
+    if not raw_tickers:
         return {'error': '유효한 티커가 없습니다.'}, 400
 
     if weights is None or len(weights) == 0:
-        weights_arr = np.array([1 / len(clean_tickers)] * len(clean_tickers), dtype=float)
+        raw_weights = np.array([1 / len(raw_tickers)] * len(raw_tickers), dtype=float)
     else:
-        if len(weights) != len(clean_tickers):
+        if len(weights) != len(raw_tickers):
             return {'error': 'weights 길이는 tickers 길이와 같아야 합니다.'}, 400
-        weights_arr = np.array([_to_float(w) for w in weights], dtype=float)
-        if np.any(weights_arr < 0):
+        raw_weights = np.array([_to_float(w) for w in weights], dtype=float)
+        if np.any(raw_weights < 0):
             return {'error': 'weights는 0 이상이어야 합니다.'}, 400
-        weight_sum = weights_arr.sum()
+        weight_sum = raw_weights.sum()
         if weight_sum == 0:
             return {'error': 'weights 합이 0일 수 없습니다.'}, 400
-        weights_arr = weights_arr / weight_sum
+        raw_weights = raw_weights / weight_sum
+
+    # merge duplicate tickers (same asset split by multiple holdings)
+    merged = {}
+    for ticker, weight in zip(raw_tickers, raw_weights):
+        merged[ticker] = merged.get(ticker, 0.0) + float(weight)
+    clean_tickers = list(merged.keys())
+    weights_arr = np.array([merged[t] for t in clean_tickers], dtype=float)
+    weights_arr = weights_arr / weights_arr.sum()
 
     valid_periods = {'1mo', '3mo', '6mo', '1y', '2y', '5y', '10y', 'ytd', 'max'}
     if period not in valid_periods:

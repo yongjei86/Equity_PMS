@@ -303,13 +303,15 @@ tr:hover td{background:rgba(255,255,255,0.02)}
 
     <!-- Summary metrics -->
     <div class="metrics" id="metrics"></div>
-    <!-- Period returns chart -->
+    <!-- Period returns table -->
     <div class="card" style="margin-bottom:16px">
       <div class="card-header">
         <span class="card-title">기간별 수익률</span>
         <span class="card-sub" id="returnsStatus"></span>
       </div>
-      <div class="returns-chart-wrap"><canvas id="returnsChart"></canvas></div>
+      <div class="table-wrap">
+        <table class="returns-table" id="returnsTable"></table>
+      </div>
     </div>
 
     <!-- Chart + Alloc -->
@@ -349,6 +351,9 @@ tr:hover td{background:rgba(255,255,255,0.02)}
         <span class="card-title">보유 종목 현황</span>
         <span class="card-sub">종목명 클릭 → 관련 뉴스</span>
       </div>
+      <div class="table-wrap" style="margin-bottom:12px">
+        <table class="returns-table" id="dashPeriodTable"></table>
+      </div>
       <div class="table-wrap">
         <table class="dash-holdings-table">
           <thead>
@@ -358,7 +363,6 @@ tr:hover td{background:rgba(255,255,255,0.02)}
               <th>매입가</th>
               <th>당일 등락</th>
               <th>수익률</th>
-              <th>평가손익 (로컬)</th>
               <th>평가손익 (억원)</th>
               <th>평가액 (억원)</th>
             </tr>
@@ -698,7 +702,7 @@ let fxRates = { USD:1, KRW:1360, JPY:150, HKD:7.8, EUR:0.92, GBP:0.79 };
 let editId = null;
 let curTradeHoldingId = null;
 let curTradeType = 'buy';
-let perfChartInst = null, allocChartInst = null, returnsChartInst = null;
+let perfChartInst = null, allocChartInst = null;
 let allNews = [];
 let newsFilter = 'all';
 const COLORS = ['#3b82f6','#22c55e','#f59e0b','#ef4444','#8b5cf6','#06b6d4','#f97316','#6b7280'];
@@ -945,7 +949,7 @@ function renderMetrics() {
   document.getElementById('metrics').innerHTML=`
     <div class="metric"><div class="metric-label">총 평가액</div><div class="metric-value">${fmtOk(totalMkt)}</div><div class="metric-change neutral">${holdings.length}개 종목 · ${fmtM(totalMkt)}</div></div>
     <div class="metric"><div class="metric-label">투자 원금</div><div class="metric-value">${fmtOk(totalCost)}</div><div class="metric-change neutral">환율 ${usdKrw.toLocaleString('ko-KR',{maximumFractionDigits:0})}원 · ${fmtM(totalCost)}</div></div>`;
-  renderReturnsChart();
+  renderPeriodTables();
   loadAllPeriods();
 }
 
@@ -960,69 +964,29 @@ async function loadAllPeriods() {
   el.textContent='';
 }
 
-function renderReturnsChart() {
+function renderPeriodTables() {
   const chartData = PERIODS.map(p => {
     const { gain, pct, hasData } = calcPeriodGain(p.key);
     return { label: p.label, gain: hasData ? gain : 0, pct: (hasData && pct !== null) ? pct : null, hasData };
   });
-  const labels = chartData.map(x => x.label);
-  const gainData = chartData.map(x => x.gain);
-  const pctData = chartData.map(x => x.pct);
-  const colors = gainData.map(v => v >= 0 ? 'rgba(34,197,94,0.55)' : 'rgba(239,68,68,0.55)');
-  const borderColors = gainData.map(v => v >= 0 ? '#22c55e' : '#ef4444');
-
-  if (returnsChartInst) returnsChartInst.destroy();
-  returnsChartInst = new Chart(document.getElementById('returnsChart'), {
-    type: 'bar',
-    data: {
-      labels,
-      datasets: [
-        {
-          type: 'bar',
-          label: '손익 (원화)',
-          data: gainData,
-          backgroundColor: colors,
-          borderColor: borderColors,
-          borderWidth: 1.2,
-          yAxisID: 'yGain',
-          borderRadius: 6
-        },
-        {
-          type: 'line',
-          label: '수익률 (%)',
-          data: pctData,
-          borderColor: '#60a5fa',
-          backgroundColor: '#60a5fa',
-          tension: 0.28,
-          spanGaps: true,
-          pointRadius: 3,
-          pointHoverRadius: 4,
-          yAxisID: 'yPct'
-        }
-      ]
-    },
-    options: {
-      responsive: true, maintainAspectRatio: false,
-      plugins: { legend: { labels: { color: '#9ca3af', boxWidth: 12 } } },
-      scales: {
-        x: { ticks: { color: '#9ca3af' }, grid: { color: 'rgba(255,255,255,0.05)' } },
-        yGain: {
-          position: 'left',
-          ticks: { color: '#9ca3af', callback: v => fmtOk(Number(v) || 0) },
-          grid: { color: 'rgba(255,255,255,0.06)' }
-        },
-        yPct: {
-          position: 'right',
-          ticks: { color: '#9ca3af', callback: v => `${Number(v).toFixed(1)}%` },
-          grid: { drawOnChartArea: false }
-        }
-      }
-    }
-  });
+  const thead = `<thead><tr><th>구분</th>${chartData.map(x=>`<th>${x.label}</th>`).join('')}</tr></thead>`;
+  const gainRow = `<tr><td>기간별 손익 (억원)</td>${chartData.map(x=>{
+    if (!x.hasData) return '<td>—</td>';
+    return `<td class="${x.gain>=0?'up':'down'}">${x.gain>=0?'+':''}${fmtOk(Math.abs(x.gain))}</td>`;
+  }).join('')}</tr>`;
+  const pctRow = `<tr><td>기간별 수익률 (%)</td>${chartData.map(x=>{
+    if (!x.hasData || x.pct===null) return '<td>—</td>';
+    return `<td class="${x.pct>=0?'up':'down'}">${x.pct>=0?'+':''}${x.pct.toFixed(2)}%</td>`;
+  }).join('')}</tr>`;
+  const html = `${thead}<tbody>${gainRow}${pctRow}</tbody>`;
+  const returnsTable = document.getElementById('returnsTable');
+  const dashPeriodTable = document.getElementById('dashPeriodTable');
+  if (returnsTable) returnsTable.innerHTML = html;
+  if (dashPeriodTable) dashPeriodTable.innerHTML = html;
 }
 
 function updateReturnsRow(periodKey) {
-  renderReturnsChart();
+  renderPeriodTables();
 }
 
 // ── DASHBOARD HOLDINGS TABLE ──
@@ -1033,7 +997,7 @@ function renderDashHoldings() {
   // sort by mktKRW desc
   const sorted=[...holdings].sort((a,b)=>calcPL(b).mktKRW-calcPL(a).mktKRW);
   body.innerHTML = sorted.map(h=>{
-    const {pl,pct,mktKRW,plLocal}=calcPL(h);
+    const {pl,pct,mktKRW}=calcPL(h);
     const cur=h.current||h.avgPrice;
     const up=pl>=0, dayUp=h.changePct>=0, hasCur=h.current>0;
     const curKRW=toKRW(cur,h.currency);
@@ -1059,7 +1023,6 @@ function renderDashHoldings() {
       </td>
       <td>${hasCur?`<span class="${dayUp?'up':'down'}">${dayUp?'▲':'▼'}${Math.abs(h.changePct).toFixed(2)}%</span>`:'—'}</td>
       <td><span class="dh-badge ${up?'dh-badge-up':'dh-badge-down'}">${fmtPct(pct)}</span></td>
-      <td class="${up?'up':'down'}">${up?'+':''}${fmtLocal(Math.abs(plLocal),h.currency)}</td>
       <td class="${up?'up':'down'}">${up?'+':''}${fmtOk(Math.abs(pl))}</td>
       <td style="font-weight:500">${fmtOk(mktKRW)}</td>
     </tr>`;
