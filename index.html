@@ -1974,6 +1974,7 @@ function renderTradeLog(){
 //  HOLDING MODAL
 // ══════════════════════════════════════════
 let tickerTimeout;
+let priceTimeout;
 let _fullTicker = null; // 자동완성으로 선택된 전체 심볼 (예: 005930.KS)
 function closeTickerSuggest() {
   const box = document.getElementById('tickerSuggest');
@@ -1987,7 +1988,22 @@ function applyTickerSuggestion(item) {
   if (item.name) document.getElementById('fName').value = item.name;
   if (item.currency) document.getElementById('fCurrency').value = item.currency;
   closeTickerSuggest();
-  _runTickerFetch();
+  clearTimeout(tickerTimeout); // 자동완성 이미 선택했으므로 제안 재조회 취소
+  // 가격만 즉시 조회
+  clearTimeout(priceTimeout);
+  priceTimeout=setTimeout(async()=>{
+    document.getElementById('fetchHint').textContent='조회 중...';
+    const r=await fetchPrice(_fullTicker.toUpperCase());
+    if(r.ok){
+      document.getElementById('fCurrency').value=r.currency||'USD';
+      document.getElementById('fetchHint').textContent=`현재가: ${fmtLocal(r.price,r.currency)} (${fmtPct(r.changePct)})`;
+      document.getElementById('fetchHint').className='fetch-hint ok';
+      if(!document.getElementById('fName').value)document.getElementById('fName').value=r.name;
+    }else{
+      document.getElementById('fetchHint').textContent='티커를 찾을 수 없습니다';
+      document.getElementById('fetchHint').className='fetch-hint err';
+    }
+  },300);
 }
 function renderTickerSuggestions(items) {
   const box = document.getElementById('tickerSuggest');
@@ -2004,13 +2020,18 @@ function renderTickerSuggestions(items) {
   box.classList.add('open');
 }
 function _runTickerFetch(){
-  clearTimeout(tickerTimeout);
   const t=document.getElementById('fTicker').value.trim();
-  if(t.length<2){ closeTickerSuggest(); return; }
-  const apiTicker=(_fullTicker||t).toUpperCase();
+  if(!t){ closeTickerSuggest(); return; }
+  // ① 자동완성 목록: 200ms 디바운스, 1글자부터
+  clearTimeout(tickerTimeout);
   tickerTimeout=setTimeout(async()=>{
     const suggestions=await fetchTickerSuggestions(t);
     renderTickerSuggestions(suggestions);
+  },200);
+  // ② 가격 조회: 700ms 디바운스, 자동완성 선택 후에만 의미 있음
+  clearTimeout(priceTimeout);
+  const apiTicker=(_fullTicker||t).toUpperCase();
+  priceTimeout=setTimeout(async()=>{
     document.getElementById('fetchHint').textContent='조회 중...';
     const r=await fetchPrice(apiTicker);
     if(r.ok){
@@ -2054,7 +2075,7 @@ function openModal(id=null){
   };
   document.getElementById('fTicker').onblur=()=>setTimeout(closeTickerSuggest,120);
 }
-function closeModal(){document.getElementById('modalBackdrop').classList.remove('open');editId=null;_fullTicker=null;}
+function closeModal(){document.getElementById('modalBackdrop').classList.remove('open');editId=null;_fullTicker=null;clearTimeout(tickerTimeout);clearTimeout(priceTimeout);}
 function closeModalOutside(e){if(e.target===document.getElementById('modalBackdrop'))closeModal();}
 async function saveHolding(){
   const ticker=(_fullTicker||document.getElementById('fTicker').value.trim()).toUpperCase();
