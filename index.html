@@ -351,9 +351,6 @@ tr:hover td{background:rgba(255,255,255,0.02)}
         <span class="card-title">보유 종목 현황</span>
         <span class="card-sub">종목명 클릭 → 관련 뉴스</span>
       </div>
-      <div class="table-wrap" style="margin-bottom:12px">
-        <table class="returns-table" id="dashPeriodTable"></table>
-      </div>
       <div class="table-wrap">
         <table class="dash-holdings-table">
           <thead>
@@ -506,6 +503,11 @@ tr:hover td{background:rgba(255,255,255,0.02)}
       <label class="form-label">Claude API Key (뉴스 AI 분석용)</label>
       <input class="form-input" id="sApiKey" type="password" placeholder="sk-ant-api03-..."/>
       <div style="font-size:11px;color:var(--muted);margin-top:4px">뉴스 번역 및 AI 요약에 사용됩니다. <a href="https://console.anthropic.com" target="_blank" style="color:var(--accent2)">console.anthropic.com</a>에서 발급</div>
+    </div>
+    <div class="form-group">
+      <label class="form-label">NewsAPI Key (실제 종목 뉴스)</label>
+      <input class="form-input" id="sNewsApiKey" type="password" placeholder="newsapi.org API Key"/>
+      <div style="font-size:11px;color:var(--muted);margin-top:4px">종목 클릭 시 실시간 뉴스 조회에 사용됩니다. <a href="https://newsapi.org" target="_blank" style="color:var(--accent2)">newsapi.org</a>에서 발급</div>
     </div>
     <div class="form-group">
       <label class="form-label">벤치마크 지수</label>
@@ -852,6 +854,9 @@ async function refreshAll() {
     const r=pm[h.ticker];
     if(r&&r.ok){ h.current=r.price; h.change=r.change; h.changePct=r.changePct; if(!h.name||h.name===h.ticker) h.name=r.name; if(!h.currency) h.currency=r.currency; }
   });
+  periodStartPrices = {};
+  benchmarkStartPrices = {};
+  sp500Snapshot = null;
   saveData();
   watchlist.forEach(t=>{
     const r=pm[t], el=document.querySelector(`[data-watch="${t}"]`);
@@ -887,6 +892,8 @@ function renderAll() { renderMetrics(); renderPerfChart(curPeriod||'1M'); render
 
 // ── METRICS & PERIOD RETURNS TABLE ──
 let periodStartPrices = {}; // { rangeKey: { ticker: startPrice } }
+let benchmarkStartPrices = {}; // { rangeKey: startPrice }
+let sp500Snapshot = null;
 const PERIOD_RANGE_MAP = { '1w':'5d', '1m':'1mo', '3m':'3mo', 'ytd':'ytd' };
 const PERIODS = [
   {key:'1d', label:'1일'},
@@ -924,6 +931,72 @@ async function fetchStartPrices(rangeKey) {
   return results;
 }
 
+async function fetchSp500Snapshot() {
+  if (sp500Snapshot) return sp500Snapshot;
+  if (BACKEND_URL) {
+    try {
+      const r = await fetch(`${BACKEND_URL}/api/price/${encodeURIComponent('^GSPC')}`);
+      if (r.ok) {
+        const j = await r.json();
+        if (j && j.ok && j.price) {
+          sp500Snapshot = j;
+          return sp500Snapshot;
+        }
+      }
+    } catch(e) {}
+  }
+  try {
+    sp500Snapshot = await fetchPrice('^GSPC');
+  } catch(e) {
+    sp500Snapshot = null;
+  }
+  return sp500Snapshot;
+}
+
+async function fetchSp500StartPrice(rangeKey) {
+  if (benchmarkStartPrices[rangeKey]) return benchmarkStartPrices[rangeKey];
+  const range = PERIOD_RANGE_MAP[rangeKey];
+  if (!range) return null;
+  if (BACKEND_URL) {
+    try {
+      const r = await fetch(`${BACKEND_URL}/api/history/${encodeURIComponent('^GSPC')}?range=${range}`);
+      if (r.ok) {
+        const j = await r.json();
+        if (j.startPrice) {
+          benchmarkStartPrices[rangeKey] = j.startPrice;
+          return j.startPrice;
+        }
+      }
+    } catch(e) {}
+  }
+  for (const host of ['query1','query2']) {
+    try {
+      const url = `https://${host}.finance.yahoo.com/v8/finance/chart/${encodeURIComponent('^GSPC')}?interval=1d&range=${range}`;
+      const r = await fetch(url,{mode:'cors',credentials:'omit'});
+      if (!r.ok) continue;
+      const j = await r.json();
+      const closes = j.chart?.result?.[0]?.indicators?.quote?.[0]?.close;
+      if (closes?.length) {
+        const start = closes.find(c=>c!=null);
+        if (start) {
+          benchmarkStartPrices[rangeKey] = start;
+          return start;
+        }
+      }
+    } catch(e) {}
+  }
+  return null;
+}
+
+function calcSp500Return(periodKey) {
+  if (periodKey === 'cost') return null;
+  if (periodKey === '1d') return Number.isFinite(sp500Snapshot?.changePct) ? sp500Snapshot.changePct : null;
+  const start = benchmarkStartPrices[periodKey];
+  const cur = sp500Snapshot?.price;
+  if (!start || !cur) return null;
+  return ((cur - start) / start) * 100;
+}
+
 function calcPeriodGain(period) {
   let gain=0, startValue=0;
   holdings.forEach(h=>{
@@ -943,25 +1016,6 @@ function calcPeriodGain(period) {
   return {gain, pct, hasData: period==='1d'||period==='cost'||(periodStartPrices[period]&&Object.keys(periodStartPrices[period]).length>0)};
 }
 
-function calcHoldingPeriodReturn(h, period) {
-  if (period === 'cost') {
-    const { pct } = calcPL(h);
-    return { pct, hasData: true };
-  }
-  if (period === '1d') {
-    if (Number.isFinite(h.changePct)) return { pct: h.changePct, hasData: true };
-    if (h.current && h.change !== undefined) {
-      const prev = h.current - h.change;
-      if (prev > 0) return { pct: ((h.current - prev) / prev) * 100, hasData: true };
-    }
-    return { pct: null, hasData: false };
-  }
-  const sp = periodStartPrices[period] || {};
-  const start = sp[h.ticker];
-  if (start && h.current) return { pct: ((h.current - start) / start) * 100, hasData: true };
-  return { pct: null, hasData: false };
-}
-
 function renderMetrics() {
   let totalCost=0, totalMkt=0;
   holdings.forEach(h=>{ const {costKRW,mktKRW}=calcPL(h); totalCost+=costKRW; totalMkt+=mktKRW; });
@@ -975,9 +1029,10 @@ function renderMetrics() {
 async function loadAllPeriods() {
   const el = document.getElementById('returnsStatus');
   el.textContent='조회 중…';
+  await fetchSp500Snapshot();
   const asyncPeriods = ['1w','1m','3m','ytd'];
   for (const p of asyncPeriods) {
-    await fetchStartPrices(p);
+    await Promise.all([fetchStartPrices(p), fetchSp500StartPrice(p)]);
     updateReturnsRow(p);
   }
   el.textContent='';
@@ -997,22 +1052,14 @@ function renderPeriodTables() {
     if (!x.hasData || x.pct===null) return '<td>—</td>';
     return `<td class="${x.pct>=0?'up':'down'}">${x.pct>=0?'+':''}${x.pct.toFixed(2)}%</td>`;
   }).join('')}</tr>`;
-  const html = `${thead}<tbody>${gainRow}${pctRow}</tbody>`;
-  const sortedHoldings = [...holdings].sort((a,b)=>calcPL(b).mktKRW-calcPL(a).mktKRW);
-  const dashThead = `<thead><tr><th>종목</th>${chartData.map(x=>`<th>${x.label}</th>`).join('')}</tr></thead>`;
-  const dashRows = sortedHoldings.map(h => {
-    const cells = PERIODS.map(p => {
-      const { pct, hasData } = calcHoldingPeriodReturn(h, p.key);
-      if (!hasData || pct === null) return '<td>—</td>';
-      return `<td class="${pct>=0?'up':'down'}">${pct>=0?'+':''}${pct.toFixed(2)}%</td>`;
-    }).join('');
-    return `<tr><td>${h.ticker}</td>${cells}</tr>`;
-  }).join('');
-  const dashHtml = `${dashThead}<tbody>${dashRows || `<tr><td colspan="${PERIODS.length+1}" class="returns-loading">보유 종목이 없습니다.</td></tr>`}</tbody>`;
+  const sp500Row = `<tr><td>S&P 500 수익률 (%)</td>${PERIODS.map(p=>{
+    const ret = calcSp500Return(p.key);
+    if (ret === null) return '<td>—</td>';
+    return `<td class="${ret>=0?'up':'down'}">${ret>=0?'+':''}${ret.toFixed(2)}%</td>`;
+  }).join('')}</tr>`;
+  const html = `${thead}<tbody>${gainRow}${pctRow}${sp500Row}</tbody>`;
   const returnsTable = document.getElementById('returnsTable');
-  const dashPeriodTable = document.getElementById('dashPeriodTable');
   if (returnsTable) returnsTable.innerHTML = html;
-  if (dashPeriodTable) dashPeriodTable.innerHTML = dashHtml;
 }
 
 function updateReturnsRow(periodKey) {
@@ -1297,7 +1344,34 @@ async function fetchStockNews(h) {
     } catch(e) { /* 서버 미실행 시 Claude로 폴백 */ }
   }
 
-  // 2순위: Claude AI로 뉴스 생성
+  // 2순위: NewsAPI 실뉴스 조회
+  const newsApiKey = appSettings.newsApiKey;
+  if (newsApiKey) {
+    try {
+      const q = encodeURIComponent(`"${ticker}" OR "${name}"`);
+      const url = `https://newsapi.org/v2/everything?q=${q}&language=en&sortBy=publishedAt&pageSize=8&apiKey=${encodeURIComponent(newsApiKey)}`;
+      const r = await fetch(url);
+      if (r.ok) {
+        const j = await r.json();
+        const articles = (j.articles || []).map(a => ({
+          title: a.title || '',
+          titleOrig: a.title || '',
+          url: a.url || '#',
+          source: a.source?.name || 'NewsAPI',
+          time: formatRelativeTime(a.publishedAt),
+          sentiment: 'neu',
+        })).filter(a => a.title);
+        if (articles.length) {
+          snewsArticles = articles;
+          renderSnewsNews();
+          translateSnewsArticles(articles);
+          return;
+        }
+      }
+    } catch(e) {}
+  }
+
+  // 3순위: Claude AI로 뉴스 생성
   const prompt = `당신은 ${name} (${ticker}) 관련 최신 금융 뉴스를 제공하는 어시스턴트입니다.
 아래 형식으로 이 종목과 관련된 최신 뉴스 헤드라인 8개와 간단한 요약을 JSON으로만 응답하세요 (다른 텍스트 없이).
 
@@ -1346,6 +1420,16 @@ async function fetchStockNews(h) {
   } catch(e) {
     document.getElementById('snewsLoading').innerHTML = `<div style="color:var(--muted);font-size:13px">${name} 뉴스를 불러올 수 없습니다.<br><span style="font-size:11px;margin-top:4px;display:block">API 키 또는 네트워크를 확인하세요.</span></div>`;
   }
+}
+
+function formatRelativeTime(isoTime) {
+  if (!isoTime) return '';
+  const dt = new Date(isoTime);
+  if (Number.isNaN(dt.getTime())) return '';
+  const diffMs = Date.now() - dt.getTime();
+  const hours = Math.max(0, Math.floor(diffMs / (1000 * 60 * 60)));
+  if (hours < 24) return `${hours}시간 전`;
+  return `${Math.floor(hours / 24)}일 전`;
 }
 
 function renderSnewsNews() {
@@ -1816,6 +1900,7 @@ async function loadRiskMetrics() {
 // ══════════════════════════════════════════
 function openSettings() {
   document.getElementById('sApiKey').value = appSettings.claudeApiKey || '';
+  document.getElementById('sNewsApiKey').value = appSettings.newsApiKey || '';
   renderBenchmarkList();
   document.getElementById('settingsBackdrop').classList.add('open');
 }
@@ -1824,6 +1909,7 @@ function closeSettingsOutside(e) { if(e.target===document.getElementById('settin
 
 function saveSettings() {
   appSettings.claudeApiKey = document.getElementById('sApiKey').value.trim();
+  appSettings.newsApiKey = document.getElementById('sNewsApiKey').value.trim();
   localStorage.setItem('folio_settings', JSON.stringify(appSettings));
   closeSettings();
   renderPerfChart(curPeriod);
