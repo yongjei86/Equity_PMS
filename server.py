@@ -2,6 +2,7 @@ from flask import Flask, jsonify, request
 from flask_cors import CORS
 import yfinance as yf
 import numpy as np
+import requests
 
 app = Flask(__name__)
 CORS(app)
@@ -275,6 +276,46 @@ def news(ticker):
         return jsonify(articles)
     except Exception as e:
         return jsonify([])
+
+
+@app.route('/api/search')
+def search_ticker():
+    query = (request.args.get('q') or '').strip()
+    if len(query) < 2:
+        return jsonify({'items': []})
+    url = 'https://query2.finance.yahoo.com/v1/finance/search'
+    params = {
+        'q': query,
+        'quotesCount': 12,
+        'newsCount': 0,
+        'enableFuzzyQuery': 'true',
+        'enableEnhancedTrivialQuery': 'true',
+        'lang': 'en-US',
+        'region': 'US',
+    }
+    try:
+        resp = requests.get(url, params=params, timeout=6)
+        resp.raise_for_status()
+        payload = resp.json()
+        quotes = payload.get('quotes', []) or []
+        items = []
+        for q in quotes:
+            symbol = (q.get('symbol') or '').strip().upper()
+            if not symbol:
+                continue
+            qtype = (q.get('quoteType') or '').upper()
+            if qtype and qtype not in {'EQUITY', 'ETF', 'INDEX'}:
+                continue
+            items.append({
+                'symbol': symbol,
+                'name': q.get('longname') or q.get('shortname') or symbol,
+                'exchange': q.get('exchDisp') or q.get('exchange') or '',
+                'currency': (q.get('currency') or '').upper(),
+                'type': qtype or '',
+            })
+        return jsonify({'items': items[:10]})
+    except Exception:
+        return jsonify({'items': []})
 
 
 @app.route('/api/portfolio/metrics', methods=['POST'])

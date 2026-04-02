@@ -64,6 +64,7 @@ nav{padding:12px 10px;flex:1}
 .returns-table td:first-child{font-family:var(--font-sans);color:var(--muted);font-size:11px;font-weight:500;text-transform:uppercase;letter-spacing:0.05em}
 .returns-table td:not(:first-child){text-align:right}
 .returns-loading{color:var(--muted);font-size:11px;font-style:italic}
+.returns-chart-wrap{position:relative;height:250px}
 .metric{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius-lg);padding:18px;transition:border-color 0.15s}
 .metric:hover{border-color:var(--border2)}
 .metric-label{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:10px}
@@ -227,6 +228,22 @@ tr:hover td{background:rgba(255,255,255,0.02)}
 .search-icon{position:absolute;left:10px;top:50%;transform:translateY(-50%);color:var(--muted)}
 .empty-state{text-align:center;padding:40px;color:var(--muted);font-size:13px}
 
+/* ── TICKER SUGGESTIONS ── */
+.ticker-suggest{position:absolute;left:0;right:0;top:100%;margin-top:6px;background:var(--bg3);border:1px solid var(--border2);border-radius:8px;max-height:220px;overflow-y:auto;display:none;z-index:50}
+.ticker-suggest.open{display:block}
+.ticker-suggest-item{padding:10px 12px;border-bottom:1px solid var(--border);cursor:pointer;display:flex;align-items:center;justify-content:space-between;gap:8px}
+.ticker-suggest-item:last-child{border-bottom:none}
+.ticker-suggest-item:hover{background:rgba(255,255,255,0.04)}
+.ticker-code{font-family:var(--font-mono);font-size:12px;font-weight:600}
+.ticker-meta{font-size:11px;color:var(--muted)}
+
+/* ── RISK METRICS ── */
+.metric-grid-3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.mini-metric{background:var(--bg3);border:1px solid var(--border);border-radius:10px;padding:14px}
+.mini-metric .label{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:8px}
+.mini-metric .value{font-size:18px;font-weight:600;font-family:var(--font-mono)}
+.mini-metric .desc{font-size:11px;color:var(--muted);margin-top:4px}
+
 ::-webkit-scrollbar{width:4px;height:4px}
 ::-webkit-scrollbar-track{background:transparent}
 ::-webkit-scrollbar-thumb{background:var(--bg3);border-radius:2px}
@@ -238,6 +255,7 @@ tr:hover td{background:rgba(255,255,255,0.02)}
   .metrics{grid-template-columns:repeat(2,minmax(0,1fr))}
   .dash-grid{grid-template-columns:1fr}
   .snews-panel,.trade-panel{width:100%}
+  .metric-grid-3{grid-template-columns:1fr}
 }
 </style>
 </head>
@@ -252,6 +270,7 @@ tr:hover td{background:rgba(255,255,255,0.02)}
   <nav>
     <button class="nav-item active" onclick="showView('dashboard',this)"><span class="nav-icon">▣</span><span>대시보드</span></button>
     <button class="nav-item" onclick="showView('holdings',this)"><span class="nav-icon">⬡</span><span>보유 종목</span></button>
+    <button class="nav-item" onclick="showView('risk',this)"><span class="nav-icon">◐</span><span>포트폴리오 지표</span></button>
     <button class="nav-item" onclick="showView('watchlist',this)"><span class="nav-icon">◎</span><span>관심 종목</span></button>
     <button class="nav-item" onclick="showView('news',this)"><span class="nav-icon">◈</span><span>마켓 뉴스</span></button>
   </nav>
@@ -284,13 +303,13 @@ tr:hover td{background:rgba(255,255,255,0.02)}
 
     <!-- Summary metrics -->
     <div class="metrics" id="metrics"></div>
-    <!-- Period returns table -->
+    <!-- Period returns chart -->
     <div class="card" style="margin-bottom:16px">
       <div class="card-header">
         <span class="card-title">기간별 수익률</span>
         <span class="card-sub" id="returnsStatus"></span>
       </div>
-      <table class="returns-table"><thead><tr><th>기간</th><th>손익 (원화)</th><th>손익 (USD)</th><th>수익률</th></tr></thead><tbody id="returnsBody"></tbody></table>
+      <div class="returns-chart-wrap"><canvas id="returnsChart"></canvas></div>
     </div>
 
     <!-- Chart + Alloc -->
@@ -409,6 +428,36 @@ tr:hover td{background:rgba(255,255,255,0.02)}
     <div class="watchlist-grid" id="watchlistGrid"></div>
     <div class="empty-state" id="emptyWatch" style="display:none">
       <div style="font-size:32px;margin-bottom:10px">👁</div>관심 종목을 추가해보세요.
+    </div>
+  </div>
+
+  <!-- ── RISK METRICS ── -->
+  <div class="view" id="view-risk">
+    <div class="topbar">
+      <div><div class="page-title">포트폴리오 평가 지표</div><div class="page-sub">샤프 · 소르티노 · MDD · 베타 등 리스크/성과 지표</div></div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <select class="form-input" id="riskPeriod" style="width:100px" onchange="loadRiskMetrics()">
+          <option value="6mo">6개월</option>
+          <option value="1y" selected>1년</option>
+          <option value="2y">2년</option>
+          <option value="5y">5년</option>
+        </select>
+        <input class="form-input" id="riskBenchmark" style="width:130px" placeholder="벤치마크 (예: ^GSPC)" value="^GSPC"/>
+        <button class="btn" onclick="loadRiskMetrics()">계산</button>
+      </div>
+    </div>
+    <div class="card" style="margin-bottom:14px">
+      <div class="card-header"><span class="card-title">핵심 리스크/성과 지표</span><span class="card-sub" id="riskStatus">—</span></div>
+      <div class="metric-grid-3" id="riskMetricsGrid"></div>
+    </div>
+    <div class="card">
+      <div class="card-header"><span class="card-title">해석 가이드</span></div>
+      <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;font-size:12px;line-height:1.6;color:var(--muted)">
+        <div><strong style="color:var(--text)">샤프 비율</strong><br/>높을수록 동일 변동성 대비 초과수익이 좋습니다.</div>
+        <div><strong style="color:var(--text)">소르티노 비율</strong><br/>하방 변동성만 반영한 수익대비 위험지표입니다.</div>
+        <div><strong style="color:var(--text)">MDD</strong><br/>최대 낙폭입니다. 절댓값이 작을수록 방어력이 좋습니다.</div>
+        <div><strong style="color:var(--text)">베타</strong><br/>시장 대비 민감도입니다. 1보다 크면 시장보다 더 크게 움직입니다.</div>
+      </div>
     </div>
   </div>
 
@@ -555,7 +604,10 @@ tr:hover td{background:rgba(255,255,255,0.02)}
     <h2 id="modalTitle">종목 추가</h2>
     <div class="form-group">
       <label class="form-label">티커 심볼</label>
-      <input class="form-input" id="fTicker" placeholder="예: AAPL, 005930.KS, 9988.HK"/>
+      <div style="position:relative">
+        <input class="form-input" id="fTicker" autocomplete="off" placeholder="예: AAPL, 005930.KS, 9988.HK, 0700.HK, 600519.SS"/>
+        <div class="ticker-suggest" id="tickerSuggest"></div>
+      </div>
       <div class="fetch-hint" id="fetchHint">입력 후 가격 자동 조회됩니다</div>
     </div>
     <div class="form-group">
@@ -646,10 +698,11 @@ let fxRates = { USD:1, KRW:1360, JPY:150, HKD:7.8, EUR:0.92, GBP:0.79 };
 let editId = null;
 let curTradeHoldingId = null;
 let curTradeType = 'buy';
-let perfChartInst = null, allocChartInst = null;
+let perfChartInst = null, allocChartInst = null, returnsChartInst = null;
 let allNews = [];
 let newsFilter = 'all';
 const COLORS = ['#3b82f6','#22c55e','#f59e0b','#ef4444','#8b5cf6','#06b6d4','#f97316','#6b7280'];
+let tickerSuggestAbort = null;
 
 // Stock news panel state
 let snewsStockId = null;
@@ -766,6 +819,23 @@ async function fetchFX() {
   });
 }
 
+async function fetchTickerSuggestions(query) {
+  if (!query || query.length < 2) return [];
+  if (tickerSuggestAbort) tickerSuggestAbort.abort();
+  tickerSuggestAbort = new AbortController();
+  const signal = tickerSuggestAbort.signal;
+  if (BACKEND_URL) {
+    try {
+      const r = await fetch(`${BACKEND_URL}/api/search?q=${encodeURIComponent(query)}`, { signal });
+      if (r.ok) {
+        const j = await r.json();
+        return Array.isArray(j.items) ? j.items : [];
+      }
+    } catch (e) {}
+  }
+  return [];
+}
+
 async function refreshAll() {
   const icon = document.getElementById('refreshIcon');
   icon.classList.add('spin');
@@ -875,7 +945,7 @@ function renderMetrics() {
   document.getElementById('metrics').innerHTML=`
     <div class="metric"><div class="metric-label">총 평가액</div><div class="metric-value">${fmtOk(totalMkt)}</div><div class="metric-change neutral">${holdings.length}개 종목 · ${fmtM(totalMkt)}</div></div>
     <div class="metric"><div class="metric-label">투자 원금</div><div class="metric-value">${fmtOk(totalCost)}</div><div class="metric-change neutral">환율 ${usdKrw.toLocaleString('ko-KR',{maximumFractionDigits:0})}원 · ${fmtM(totalCost)}</div></div>`;
-  renderReturnsTable();
+  renderReturnsChart();
   loadAllPeriods();
 }
 
@@ -890,33 +960,69 @@ async function loadAllPeriods() {
   el.textContent='';
 }
 
-function renderReturnsTable() {
-  document.getElementById('returnsBody').innerHTML = PERIODS.map(p=>{
-    const {gain,pct,hasData}=calcPeriodGain(p.key);
-    return returnsRowHTML(p.label, gain, pct, hasData);
-  }).join('');
+function renderReturnsChart() {
+  const chartData = PERIODS.map(p => {
+    const { gain, pct, hasData } = calcPeriodGain(p.key);
+    return { label: p.label, gain: hasData ? gain : 0, pct: (hasData && pct !== null) ? pct : null, hasData };
+  });
+  const labels = chartData.map(x => x.label);
+  const gainData = chartData.map(x => x.gain);
+  const pctData = chartData.map(x => x.pct);
+  const colors = gainData.map(v => v >= 0 ? 'rgba(34,197,94,0.55)' : 'rgba(239,68,68,0.55)');
+  const borderColors = gainData.map(v => v >= 0 ? '#22c55e' : '#ef4444');
+
+  if (returnsChartInst) returnsChartInst.destroy();
+  returnsChartInst = new Chart(document.getElementById('returnsChart'), {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [
+        {
+          type: 'bar',
+          label: '손익 (원화)',
+          data: gainData,
+          backgroundColor: colors,
+          borderColor: borderColors,
+          borderWidth: 1.2,
+          yAxisID: 'yGain',
+          borderRadius: 6
+        },
+        {
+          type: 'line',
+          label: '수익률 (%)',
+          data: pctData,
+          borderColor: '#60a5fa',
+          backgroundColor: '#60a5fa',
+          tension: 0.28,
+          spanGaps: true,
+          pointRadius: 3,
+          pointHoverRadius: 4,
+          yAxisID: 'yPct'
+        }
+      ]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { labels: { color: '#9ca3af', boxWidth: 12 } } },
+      scales: {
+        x: { ticks: { color: '#9ca3af' }, grid: { color: 'rgba(255,255,255,0.05)' } },
+        yGain: {
+          position: 'left',
+          ticks: { color: '#9ca3af', callback: v => fmtOk(Number(v) || 0) },
+          grid: { color: 'rgba(255,255,255,0.06)' }
+        },
+        yPct: {
+          position: 'right',
+          ticks: { color: '#9ca3af', callback: v => `${Number(v).toFixed(1)}%` },
+          grid: { drawOnChartArea: false }
+        }
+      }
+    }
+  });
 }
 
 function updateReturnsRow(periodKey) {
-  const p = PERIODS.find(x=>x.key===periodKey);
-  if (!p) return;
-  const rows = document.getElementById('returnsBody').querySelectorAll('tr');
-  const idx = PERIODS.indexOf(p);
-  if (!rows[idx]) return;
-  const {gain,pct}=calcPeriodGain(p.key);
-  rows[idx].innerHTML = returnsRowCells(p.label, gain, pct, true);
-}
-
-function returnsRowHTML(label, gain, pct, hasData) {
-  return `<tr>${returnsRowCells(label, gain, pct, hasData)}</tr>`;
-}
-
-function returnsRowCells(label, gain, pct, hasData) {
-  if (!hasData || pct===null) {
-    return `<td>${label}</td><td class="returns-loading">조회 중…</td><td class="returns-loading">—</td><td class="returns-loading">—</td>`;
-  }
-  const up=gain>=0, cls=up?'up':'down';
-  return `<td>${label}</td><td class="${cls}">${up?'+':''}${fmtOk(Math.abs(gain))}</td><td class="${cls}">${up?'+':''}${fmtM(Math.abs(gain))}</td><td class="${cls}" style="font-weight:600">${fmtPct(pct||0)}</td>`;
+  renderReturnsChart();
 }
 
 // ── DASHBOARD HOLDINGS TABLE ──
@@ -1525,6 +1631,32 @@ function renderTradeLog(){
 //  HOLDING MODAL
 // ══════════════════════════════════════════
 let tickerTimeout;
+function closeTickerSuggest() {
+  const box = document.getElementById('tickerSuggest');
+  box.classList.remove('open');
+  box.innerHTML = '';
+}
+function applyTickerSuggestion(item) {
+  document.getElementById('fTicker').value = item.symbol || '';
+  if (item.name) document.getElementById('fName').value = item.name;
+  if (item.currency) document.getElementById('fCurrency').value = item.currency;
+  closeTickerSuggest();
+  document.getElementById('fTicker').dispatchEvent(new Event('input'));
+}
+function renderTickerSuggestions(items) {
+  const box = document.getElementById('tickerSuggest');
+  if (!items.length) { closeTickerSuggest(); return; }
+  box.innerHTML = items.map((s,idx)=>`
+    <div class="ticker-suggest-item" onclick="applyTickerSuggestion(window._tickerSuggestItems[${idx}])">
+      <div>
+        <div class="ticker-code">${s.symbol}</div>
+        <div class="ticker-meta">${s.name || s.symbol}</div>
+      </div>
+      <div class="ticker-meta">${[s.exchange, s.currency].filter(Boolean).join(' · ')}</div>
+    </div>`).join('');
+  window._tickerSuggestItems = items;
+  box.classList.add('open');
+}
 function openModal(id=null){
   editId=id;
   document.getElementById('modalTitle').textContent=id?'종목 수정':'종목 추가';
@@ -1546,11 +1678,14 @@ function openModal(id=null){
     document.getElementById('fetchHint').className='fetch-hint';
   }
   document.getElementById('modalBackdrop').classList.add('open');
+  closeTickerSuggest();
   document.getElementById('fTicker').oninput=()=>{
     clearTimeout(tickerTimeout);
     const t=document.getElementById('fTicker').value.trim();
-    if(t.length<2)return;
+    if(t.length<2){ closeTickerSuggest(); return; }
     tickerTimeout=setTimeout(async()=>{
+      const suggestions = await fetchTickerSuggestions(t);
+      renderTickerSuggestions(suggestions);
       document.getElementById('fetchHint').textContent='조회 중...';
       const r=await fetchPrice(t.toUpperCase());
       if(r.ok){
@@ -1564,6 +1699,7 @@ function openModal(id=null){
       }
     },700);
   };
+  document.getElementById('fTicker').onblur=()=>setTimeout(closeTickerSuggest,120);
 }
 function closeModal(){document.getElementById('modalBackdrop').classList.remove('open');editId=null;}
 function closeModalOutside(e){if(e.target===document.getElementById('modalBackdrop'))closeModal();}
@@ -1617,6 +1753,7 @@ function showView(name,el){
   el.classList.add('active');
   if(name==='news')loadNews();
   if(name==='watchlist')renderWatchlist();
+  if(name==='risk')loadRiskMetrics();
 }
 let stTimer;
 function showStatus(msg, isError=false){
@@ -1625,6 +1762,60 @@ function showStatus(msg, isError=false){
   bar.classList.toggle('error', isError);
   bar.classList.add('visible');clearTimeout(stTimer);
   stTimer=setTimeout(()=>{ bar.classList.remove('visible'); bar.classList.remove('error'); }, isError ? 5000 : 2500);
+}
+
+async function loadRiskMetrics() {
+  const grid = document.getElementById('riskMetricsGrid');
+  const status = document.getElementById('riskStatus');
+  if (!grid || !status) return;
+  if (!holdings.length) {
+    grid.innerHTML = '<div class="empty-state" style="grid-column:1/-1">보유 종목이 없어 지표를 계산할 수 없습니다.</div>';
+    status.textContent = '종목 없음';
+    return;
+  }
+  const totalKRW = holdings.reduce((sum,h)=>sum + calcPL(h).mktKRW,0);
+  const weights = holdings.map(h=> totalKRW>0 ? calcPL(h).mktKRW/totalKRW : 1/holdings.length);
+  const payload = {
+    tickers: holdings.map(h=>h.ticker),
+    weights,
+    period: document.getElementById('riskPeriod').value,
+    benchmark: (document.getElementById('riskBenchmark').value.trim() || '^GSPC').toUpperCase(),
+    riskFreeRate: 0.03
+  };
+  grid.innerHTML = '<div class="empty-state" style="grid-column:1/-1">지표 계산 중...</div>';
+  status.textContent = `${payload.period} / ${payload.benchmark}`;
+  try {
+    const r = await fetch(`${BACKEND_URL}/api/portfolio/metrics`, {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(payload)
+    });
+    const j = await r.json();
+    if (!r.ok || !j.ok || !j.metrics) throw new Error(j.error || '지표 계산 실패');
+    const m = j.metrics;
+    const cards = [
+      ['샤프', m.sharpeRatio, '위험 대비 초과수익'],
+      ['소르티노', m.sortinoRatio, '하방위험 반영'],
+      ['MDD', m.maxDrawdown, '최대 낙폭', true],
+      ['베타', m.beta, '시장 민감도'],
+      ['알파', m.alpha, '시장 대비 초과수익'],
+      ['변동성', m.volatility, '연율 변동성', true],
+      ['정보비율', m.informationRatio, '벤치마크 대비 효율'],
+      ['상관계수', m.correlationWithBenchmark, '벤치마크 동조성'],
+      ['VaR 95%', m.var95Daily, '일간 하방 위험', true],
+    ];
+    grid.innerHTML = cards.map(([label,val,desc,pct])=>`
+      <div class="mini-metric">
+        <div class="label">${label}</div>
+        <div class="value ${Number(val)>=0?'up':'down'}">${val===null||val===undefined?'—':(pct?fmtPct(Number(val)*100):Number(val).toFixed(3))}</div>
+        <div class="desc">${desc}</div>
+      </div>
+    `).join('');
+    status.textContent = `완료 · 종목 ${holdings.length}개`;
+  } catch(e) {
+    grid.innerHTML = `<div class="empty-state" style="grid-column:1/-1">지표 계산 실패: ${e.message}</div>`;
+    status.textContent = '실패';
+  }
 }
 
 // ══════════════════════════════════════════
