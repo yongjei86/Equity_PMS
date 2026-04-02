@@ -834,6 +834,64 @@ function calcPL(h) {
 // ══════════════════════════════════════════
 // 로컬 백엔드 서버 주소 (server.py). 사용하지 않으려면 null로 설정.
 const BACKEND_URL = 'http://localhost:5000';
+const PORTFOLIO_SYNC_KEY = 'default';
+
+function getStateSnapshot() {
+  return { holdings, trades, watchlist, appSettings };
+}
+
+function applyStateSnapshot(state) {
+  if (!state || typeof state !== 'object') return;
+  if (Array.isArray(state.holdings)) holdings = state.holdings;
+  if (state.trades && typeof state.trades === 'object') trades = state.trades;
+  if (Array.isArray(state.watchlist)) watchlist = state.watchlist;
+  if (state.appSettings && typeof state.appSettings === 'object') appSettings = state.appSettings;
+  if (!appSettings.benchmarks) appSettings.benchmarks = [
+    {ticker:'^GSPC', name:'S&P 500', color:'#6b7280'},
+    {ticker:'^KS11', name:'코스피', color:'#f59e0b'}
+  ];
+}
+
+function persistLocalState() {
+  localStorage.setItem('folio_h', JSON.stringify(holdings));
+  localStorage.setItem('folio_t', JSON.stringify(trades));
+  localStorage.setItem('folio_w', JSON.stringify(watchlist));
+  localStorage.setItem('folio_settings', JSON.stringify(appSettings));
+}
+
+async function syncStateToServer() {
+  if (!BACKEND_URL) return false;
+  try {
+    const r = await fetch(`${BACKEND_URL}/api/portfolio/state`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key: PORTFOLIO_SYNC_KEY, state: getStateSnapshot() })
+    });
+    return r.ok;
+  } catch (e) {
+    return false;
+  }
+}
+
+function saveAllState() {
+  persistLocalState();
+  syncStateToServer();
+}
+
+async function loadSyncedState() {
+  if (!BACKEND_URL) return false;
+  try {
+    const r = await fetch(`${BACKEND_URL}/api/portfolio/state?key=${encodeURIComponent(PORTFOLIO_SYNC_KEY)}`);
+    if (!r.ok) return false;
+    const j = await r.json();
+    if (!j.ok || !j.state) return false;
+    applyStateSnapshot(j.state);
+    persistLocalState();
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
 
 function parseYahooResponse(j, ticker) {
   if (!j.chart || !j.chart.result || !j.chart.result[0]) throw new Error('Invalid response');
@@ -1790,12 +1848,12 @@ async function renderWatchlist(){
     else{el.querySelector('.wp').textContent='조회 실패';}
   });
 }
-function removeWatch(t){watchlist=watchlist.filter(x=>x!==t);localStorage.setItem('folio_w',JSON.stringify(watchlist));renderWatchlist();}
+function removeWatch(t){watchlist=watchlist.filter(x=>x!==t);saveAllState();renderWatchlist();}
 function openWatchModal(){document.getElementById('watchModalBackdrop').classList.add('open');document.getElementById('wTicker').value='';}
 async function addWatchItem(){
   const t=document.getElementById('wTicker').value.trim().toUpperCase();
   if(!t||watchlist.includes(t)){document.getElementById('watchModalBackdrop').classList.remove('open');return;}
-  watchlist.push(t);localStorage.setItem('folio_w',JSON.stringify(watchlist));
+  watchlist.push(t);saveAllState();
   document.getElementById('watchModalBackdrop').classList.remove('open');renderWatchlist();
 }
 
@@ -1976,8 +2034,8 @@ function delHolding(id){
 // ══════════════════════════════════════════
 //  PERSIST / CSV
 // ══════════════════════════════════════════
-function saveData(){localStorage.setItem('folio_h',JSON.stringify(holdings));}
-function saveTrades(){localStorage.setItem('folio_t',JSON.stringify(trades));}
+function saveData(){saveAllState();}
+function saveTrades(){saveAllState();}
 function exportCSV(){
   const rows=[['티커','종목명','섹터','통화','평균단가','수량','현재가','평가액(억원)','평가손익(억원)','수익률(%)']];
   holdings.forEach(h=>{const{pl,pct,mktKRW}=calcPL(h);rows.push([h.ticker,h.name||h.ticker,h.sector,h.currency||'USD',h.avgPrice,h.qty,h.current||0,(mktKRW/1e8).toFixed(4),(pl/1e8).toFixed(4),pct.toFixed(2)]);});
@@ -2077,7 +2135,7 @@ function closeSettingsOutside(e) { if(e.target===document.getElementById('settin
 function saveSettings() {
   appSettings.claudeApiKey = document.getElementById('sApiKey').value.trim();
   appSettings.newsApiKey = document.getElementById('sNewsApiKey').value.trim();
-  localStorage.setItem('folio_settings', JSON.stringify(appSettings));
+  saveAllState();
   closeSettings();
   renderPerfChart(curPeriod);
   showStatus('설정이 저장되었습니다');
@@ -2154,9 +2212,12 @@ refreshAll = async function() {
 //  INIT
 // ══════════════════════════════════════════
 document.getElementById('dashDate').textContent=new Date().toLocaleDateString('ko-KR',{year:'numeric',month:'long',day:'numeric',weekday:'long'});
-renderAll();
-refreshAll();
-startAutoRefresh();
+(async () => {
+  await loadSyncedState();
+  renderAll();
+  refreshAll();
+  startAutoRefresh();
+})();
 </script>
 </body>
 </html>

@@ -3,9 +3,14 @@ from flask_cors import CORS
 import yfinance as yf
 import numpy as np
 import requests
+import os
+import json
+from threading import Lock
 
 app = Flask(__name__)
 CORS(app)
+STATE_FILE = os.path.join(os.path.dirname(__file__), 'portfolio_state.json')
+STATE_LOCK = Lock()
 
 
 def get_price_data(ticker):
@@ -45,6 +50,22 @@ def _to_float(value, default=0.0):
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def load_state():
+    if not os.path.exists(STATE_FILE):
+        return {}
+    try:
+        with open(STATE_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def save_state(state_obj):
+    with open(STATE_FILE, 'w', encoding='utf-8') as f:
+        json.dump(state_obj, f, ensure_ascii=False, indent=2)
 
 
 def calculate_portfolio_metrics(tickers, weights=None, period='1y', benchmark='^GSPC', risk_free_rate=0.03):
@@ -343,6 +364,35 @@ def portfolio_metrics():
         risk_free_rate=risk_free_rate
     )
     return jsonify(result), status
+
+
+@app.route('/api/portfolio/state', methods=['GET'])
+def get_portfolio_state():
+    key = (request.args.get('key') or 'default').strip() or 'default'
+    with STATE_LOCK:
+        all_states = load_state()
+        state = all_states.get(key)
+    return jsonify({'ok': True, 'state': state}), 200
+
+
+@app.route('/api/portfolio/state', methods=['POST'])
+def set_portfolio_state():
+    payload = request.get_json(silent=True) or {}
+    key = (payload.get('key') or 'default').strip() or 'default'
+    state = payload.get('state')
+    if not isinstance(state, dict):
+        return jsonify({'ok': False, 'error': 'state는 객체여야 합니다.'}), 400
+    safe_state = {
+        'holdings': state.get('holdings') if isinstance(state.get('holdings'), list) else [],
+        'trades': state.get('trades') if isinstance(state.get('trades'), dict) else {},
+        'watchlist': state.get('watchlist') if isinstance(state.get('watchlist'), list) else [],
+        'appSettings': state.get('appSettings') if isinstance(state.get('appSettings'), dict) else {},
+    }
+    with STATE_LOCK:
+        all_states = load_state()
+        all_states[key] = safe_state
+        save_state(all_states)
+    return jsonify({'ok': True}), 200
 
 
 @app.route('/health')
