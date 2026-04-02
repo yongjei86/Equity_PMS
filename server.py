@@ -64,6 +64,23 @@ def prices():
     return jsonify(result)
 
 
+@app.route('/api/history/<path:ticker>')
+def history(ticker):
+    from flask import request
+    range_param = request.args.get('range', '1mo')
+    if range_param not in {'5d', '1mo', '3mo', 'ytd', '1y'}:
+        return jsonify({'error': 'invalid range'}), 400
+    try:
+        t = yf.Ticker(ticker)
+        hist = t.history(period=range_param)
+        if hist.empty:
+            return jsonify({'startPrice': None})
+        start_price = float(hist['Close'].dropna().iloc[0])
+        return jsonify({'startPrice': round(start_price, 6)})
+    except Exception:
+        return jsonify({'startPrice': None})
+
+
 @app.route('/api/news/<path:ticker>')
 def news(ticker):
     try:

@@ -273,6 +273,17 @@ tr:hover td{background:rgba(255,255,255,0.02)}
     </div>
 
     <!-- Summary metrics -->
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+      <div class="tab-row" id="periodTabs" style="margin:0">
+        <button class="tab active" onclick="setMetricPeriod('1d',this)">1일</button>
+        <button class="tab" onclick="setMetricPeriod('1w',this)">1주</button>
+        <button class="tab" onclick="setMetricPeriod('1m',this)">1달</button>
+        <button class="tab" onclick="setMetricPeriod('3m',this)">분기</button>
+        <button class="tab" onclick="setMetricPeriod('ytd',this)">YTD</button>
+        <button class="tab" onclick="setMetricPeriod('cost',this)">원금</button>
+      </div>
+      <div id="periodLoading" style="font-size:11px;color:var(--muted);display:none">기간 데이터 로딩 중…</div>
+    </div>
     <div class="metrics" id="metrics"></div>
 
     <!-- Chart + Alloc -->
@@ -742,15 +753,80 @@ async function refreshAll() {
 // ══════════════════════════════════════════
 function renderAll() { renderMetrics(); renderPerfChart('1M'); renderAlloc(); renderDashHoldings(); renderHoldings(); renderMovers(); }
 
+// ── PERIOD METRICS ──
+let metricPeriod = '1d';
+let periodStartPrices = {}; // { period: { ticker: startPrice } }
+
+const PERIOD_RANGE_MAP = { '1w':'5d', '1m':'1mo', '3m':'3mo', 'ytd':'ytd' };
+const PERIOD_LABEL = { '1d':'1일', '1w':'1주', '1m':'1달', '3m':'분기', 'ytd':'YTD', 'cost':'원금 대비' };
+
+async function fetchStartPrices(period) {
+  if (period === '1d' || period === 'cost') return {};
+  if (periodStartPrices[period]) return periodStartPrices[period];
+  const range = PERIOD_RANGE_MAP[period];
+  const tickers = [...new Set(holdings.map(h=>h.ticker))];
+  const results = {};
+  await Promise.all(tickers.map(async ticker=>{
+    // 1순위: 백엔드
+    if (BACKEND_URL) {
+      try {
+        const r = await fetch(`${BACKEND_URL}/api/history/${encodeURIComponent(ticker)}?range=${range}`);
+        if (r.ok) { const j=await r.json(); if(j.startPrice) { results[ticker]=j.startPrice; return; } }
+      } catch(e) {}
+    }
+    // 2순위: Yahoo Finance 직접
+    for (const host of ['query1','query2']) {
+      try {
+        const url=`https://${host}.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}?interval=1d&range=${range}`;
+        const r=await fetch(url,{mode:'cors',credentials:'omit'});
+        if (!r.ok) continue;
+        const j=await r.json();
+        const closes=j.chart?.result?.[0]?.indicators?.quote?.[0]?.close;
+        if (closes?.length) { results[ticker]=closes.find(c=>c!=null); return; }
+      } catch(e) {}
+    }
+  }));
+  periodStartPrices[period] = results;
+  return results;
+}
+
+async function setMetricPeriod(period, el) {
+  metricPeriod = period;
+  document.querySelectorAll('#periodTabs .tab').forEach(t=>t.classList.remove('active'));
+  el.classList.add('active');
+  if (period !== '1d' && period !== 'cost') {
+    document.getElementById('periodLoading').style.display='';
+    await fetchStartPrices(period);
+    document.getElementById('periodLoading').style.display='none';
+  }
+  renderMetrics();
+}
+
 function renderMetrics() {
-  let totalCost=0, totalMkt=0, dayGain=0;
-  holdings.forEach(h=>{ const {costKRW,mktKRW}=calcPL(h); totalCost+=costKRW; totalMkt+=mktKRW; if(h.change) dayGain+=toKRW(h.change*h.qty,h.currency); });
-  const pl=totalMkt-totalCost, pct=totalCost>0?(pl/totalCost)*100:0;
-  const up=pl>=0, dayUp=dayGain>=0;
+  let totalCost=0, totalMkt=0, periodGain=0, startValue=0;
+  const sp = periodStartPrices[metricPeriod] || {};
+  holdings.forEach(h=>{
+    const {costKRW,mktKRW}=calcPL(h);
+    totalCost+=costKRW; totalMkt+=mktKRW;
+    if (metricPeriod==='1d') {
+      if (h.change) periodGain+=toKRW(h.change*h.qty,h.currency);
+      startValue+=mktKRW-toKRW((h.change||0)*h.qty,h.currency);
+    } else if (metricPeriod==='cost') {
+      periodGain+=mktKRW-costKRW;
+      startValue+=costKRW;
+    } else {
+      const s=sp[h.ticker];
+      if (s && h.current) { periodGain+=toKRW((h.current-s)*h.qty,h.currency); startValue+=toKRW(s*h.qty,h.currency); }
+    }
+  });
+  const pct = startValue>0?(periodGain/startValue)*100:0;
+  const totalPl=totalMkt-totalCost, totalPct=totalCost>0?(totalPl/totalCost)*100:0;
+  const up=periodGain>=0, totalUp=totalPl>=0;
+  const label=PERIOD_LABEL[metricPeriod]||metricPeriod;
   document.getElementById('metrics').innerHTML=`
     <div class="metric"><div class="metric-label">총 평가액</div><div class="metric-value">${fmtOk(totalMkt)}</div><div class="metric-change neutral">${holdings.length}개 종목</div></div>
-    <div class="metric"><div class="metric-label">총 평가손익</div><div class="metric-value ${up?'up':'down'}">${up?'+':''}${fmtOk(Math.abs(pl))}</div><div class="metric-change ${up?'up':'down'}">${fmtPct(pct)}</div></div>
-    <div class="metric"><div class="metric-label">당일 손익</div><div class="metric-value ${dayUp?'up':'down'}">${dayUp?'+':''}${fmtOk(Math.abs(dayGain))}</div><div class="metric-change ${dayUp?'up':'down'}">${dayUp?'▲':'▼'} 오늘</div></div>
+    <div class="metric"><div class="metric-label">${label} 손익</div><div class="metric-value ${up?'up':'down'}">${up?'+':''}${fmtOk(Math.abs(periodGain))}</div><div class="metric-change ${up?'up':'down'}">${fmtPct(pct)}</div></div>
+    <div class="metric"><div class="metric-label">${label} 수익률</div><div class="metric-value ${up?'up':'down'}">${fmtPct(pct)}</div><div class="metric-change ${up?'up':'down'}">${up?'+':''}${fmtOk(Math.abs(periodGain))}</div></div>
     <div class="metric"><div class="metric-label">투자 원금</div><div class="metric-value">${fmtOk(totalCost)}</div><div class="metric-change neutral">환율 ${usdKrw.toLocaleString('ko-KR',{maximumFractionDigits:0})}원</div></div>`;
 }
 
