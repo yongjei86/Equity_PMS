@@ -943,6 +943,25 @@ function calcPeriodGain(period) {
   return {gain, pct, hasData: period==='1d'||period==='cost'||(periodStartPrices[period]&&Object.keys(periodStartPrices[period]).length>0)};
 }
 
+function calcHoldingPeriodReturn(h, period) {
+  if (period === 'cost') {
+    const { pct } = calcPL(h);
+    return { pct, hasData: true };
+  }
+  if (period === '1d') {
+    if (Number.isFinite(h.changePct)) return { pct: h.changePct, hasData: true };
+    if (h.current && h.change !== undefined) {
+      const prev = h.current - h.change;
+      if (prev > 0) return { pct: ((h.current - prev) / prev) * 100, hasData: true };
+    }
+    return { pct: null, hasData: false };
+  }
+  const sp = periodStartPrices[period] || {};
+  const start = sp[h.ticker];
+  if (start && h.current) return { pct: ((h.current - start) / start) * 100, hasData: true };
+  return { pct: null, hasData: false };
+}
+
 function renderMetrics() {
   let totalCost=0, totalMkt=0;
   holdings.forEach(h=>{ const {costKRW,mktKRW}=calcPL(h); totalCost+=costKRW; totalMkt+=mktKRW; });
@@ -979,10 +998,21 @@ function renderPeriodTables() {
     return `<td class="${x.pct>=0?'up':'down'}">${x.pct>=0?'+':''}${x.pct.toFixed(2)}%</td>`;
   }).join('')}</tr>`;
   const html = `${thead}<tbody>${gainRow}${pctRow}</tbody>`;
+  const sortedHoldings = [...holdings].sort((a,b)=>calcPL(b).mktKRW-calcPL(a).mktKRW);
+  const dashThead = `<thead><tr><th>종목</th>${chartData.map(x=>`<th>${x.label}</th>`).join('')}</tr></thead>`;
+  const dashRows = sortedHoldings.map(h => {
+    const cells = PERIODS.map(p => {
+      const { pct, hasData } = calcHoldingPeriodReturn(h, p.key);
+      if (!hasData || pct === null) return '<td>—</td>';
+      return `<td class="${pct>=0?'up':'down'}">${pct>=0?'+':''}${pct.toFixed(2)}%</td>`;
+    }).join('');
+    return `<tr><td>${h.ticker}</td>${cells}</tr>`;
+  }).join('');
+  const dashHtml = `${dashThead}<tbody>${dashRows || `<tr><td colspan="${PERIODS.length+1}" class="returns-loading">보유 종목이 없습니다.</td></tr>`}</tbody>`;
   const returnsTable = document.getElementById('returnsTable');
   const dashPeriodTable = document.getElementById('dashPeriodTable');
   if (returnsTable) returnsTable.innerHTML = html;
-  if (dashPeriodTable) dashPeriodTable.innerHTML = html;
+  if (dashPeriodTable) dashPeriodTable.innerHTML = dashHtml;
 }
 
 function updateReturnsRow(periodKey) {
