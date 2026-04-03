@@ -896,13 +896,6 @@ function applyStateSnapshot(state) {
   ];
 }
 
-function persistLocalState() {
-  localStorage.setItem('folio_h', JSON.stringify(holdings));
-  localStorage.setItem('folio_t', JSON.stringify(trades));
-  localStorage.setItem('folio_w', JSON.stringify(watchlist));
-  localStorage.setItem('folio_settings', JSON.stringify(appSettings));
-}
-
 async function syncStateToServer() {
   if (!BACKEND_URL) return false;
   try {
@@ -919,7 +912,7 @@ async function syncStateToServer() {
 
 function saveAllState() {
   syncStateToServer().then(ok => {
-    if (!ok) persistLocalState();
+    if (!ok) showStatus('Supabase 동기화 실패: 서버 연결 상태를 확인하세요', true);
   });
 }
 
@@ -1081,11 +1074,12 @@ async function fetchTickerSuggestions(query) {
   return [];
 }
 
-async function refreshAll() {
+async function refreshAll(options = {}) {
+  const { allowTickerFallback = true, persistSnapshot = true, suppressStatus = false } = options;
   const icon = document.getElementById('refreshIcon');
   icon.classList.add('spin');
-  await fetchFX();
   const tickers = [...new Set([...holdings.map(h=>h.ticker),...watchlist])];
+  const fxPromise = fetchFX();
   let pm = {};
   // 배치 엔드포인트로 한 번에 조회 (서버에서 병렬 처리)
   if (BACKEND_URL && tickers.length) {
@@ -1099,10 +1093,11 @@ async function refreshAll() {
   }
   // 배치에서 누락된 티커는 개별 조회 (서버 없는 경우 포함)
   const missing = tickers.filter(t => !pm[t]);
-  if (missing.length) {
+  if (allowTickerFallback && missing.length) {
     const results = await Promise.all(missing.map(t => fetchPrice(t)));
     missing.forEach((t, i) => { pm[t] = results[i]; });
   }
+  await fxPromise;
   holdings.forEach(h=>{
     const r=pm[h.ticker];
     if(r&&r.ok){ h.current=r.price; h.change=r.change; h.changePct=r.changePct; if(!h.name||h.name===h.ticker) h.name=r.name; if(!h.currency) h.currency=r.currency; }
@@ -1111,7 +1106,7 @@ async function refreshAll() {
   benchmarkStartPrices = {};
   sp500Snapshot = null;
   saveData();
-  await saveDailySnapshot();
+  if (persistSnapshot) await saveDailySnapshot();
   watchlist.forEach(t=>{
     const r=pm[t], el=document.querySelector(`[data-watch="${t}"]`);
     if(el&&r){
@@ -1124,13 +1119,15 @@ async function refreshAll() {
   renderAll();
   icon.classList.remove('spin');
   document.getElementById('lastUpdated').textContent='업데이트: '+new Date().toLocaleTimeString('ko-KR',{hour:'2-digit',minute:'2-digit'});
-  const failedCount = Object.values(pm).filter(r => !r.ok).length;
-  if (failedCount > 0 && failedCount === Object.keys(pm).length) {
-    showStatus('가격 업데이트 실패 - Yahoo Finance API 연결을 확인하세요', true);
-  } else if (failedCount > 0) {
-    showStatus(`가격 업데이트 완료 (${failedCount}개 종목 실패)`);
-  } else {
-    showStatus('가격 업데이트 완료');
+  if (!suppressStatus) {
+    const failedCount = Object.values(pm).filter(r => !r.ok).length;
+    if (failedCount > 0 && failedCount === Object.keys(pm).length) {
+      showStatus('가격 업데이트 실패 - Yahoo Finance API 연결을 확인하세요', true);
+    } else if (failedCount > 0) {
+      showStatus(`가격 업데이트 완료 (${failedCount}개 종목 실패)`);
+    } else {
+      showStatus('가격 업데이트 완료');
+    }
   }
   // If stock news panel is open, refresh its prices too
   if (snewsStockId !== null) {
@@ -2400,24 +2397,18 @@ function openBenchmarkSettings() { openSettings(); }
 // ══════════════════════════════════════════
 document.getElementById('dashDate').textContent=new Date().toLocaleDateString('ko-KR',{year:'numeric',month:'long',day:'numeric',weekday:'long'});
 (async () => {
-  // 데이터 우선순위: 백엔드 DB → (실패 시) 로컬 백업 → 기본 샘플
+  // 데이터 소스는 Supabase 단일 경로 사용
   const synced = await loadSyncedState();
   if (!synced) {
-    const localHoldings = JSON.parse(localStorage.getItem('folio_h') || 'null');
-    const localTrades = JSON.parse(localStorage.getItem('folio_t') || 'null');
-    const localWatchlist = JSON.parse(localStorage.getItem('folio_w') || 'null');
-    const localSettings = JSON.parse(localStorage.getItem('folio_settings') || 'null');
-    if (Array.isArray(localHoldings)) holdings = localHoldings;
-    if (localTrades && typeof localTrades === 'object') trades = localTrades;
-    if (Array.isArray(localWatchlist)) watchlist = localWatchlist;
-    if (localSettings && typeof localSettings === 'object') appSettings = localSettings;
+    showStatus('Supabase 상태를 불러오지 못했습니다. 서버 설정을 확인하세요.', true);
   }
   if (!appSettings.benchmarks) appSettings.benchmarks = [
     {ticker:'^GSPC', name:'S&P 500', color:'#6b7280'},
     {ticker:'^KS11', name:'코스피', color:'#f59e0b'}
   ];
   renderAll();
-  refreshAll();
+  // 초기 진입 속도를 위해 배치 API만 백그라운드 갱신 (개별 폴백/스냅샷 저장 생략)
+  refreshAll({ allowTickerFallback:false, persistSnapshot:false, suppressStatus:true });
 })();
 </script>
 </body>
