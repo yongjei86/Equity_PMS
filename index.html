@@ -97,6 +97,7 @@ nav{padding:12px 10px;flex:1}
 .dash-holdings-table td:not(:first-child){text-align:right;font-family:var(--font-mono);font-size:11px}
 .dash-holdings-table tr:last-child td{border-bottom:none}
 .dash-holdings-table tr:hover td{background:rgba(255,255,255,0.02)}
+.holding-row.dragging{opacity:0.45}
 .stock-link{cursor:pointer;transition:color 0.12s}
 .stock-link:hover .dh-ticker{color:var(--accent2)}
 .dh-ticker{font-weight:600;font-size:12px;font-family:var(--font-mono)}
@@ -632,11 +633,16 @@ tr:hover td{background:rgba(255,255,255,0.02)}
   <div class="snews-body">
     <div class="snews-tabs tab-row" style="margin-bottom:16px">
       <button class="tab active" onclick="switchStockTab('news',this)">관련 뉴스</button>
+      <button class="tab" onclick="switchStockTab('history',this)">수익률 추이</button>
       <button class="tab" onclick="switchStockTab('summary',this)">AI 요약</button>
     </div>
     <div id="snewsNewsTab">
       <div class="snews-loading" id="snewsLoading">뉴스를 검색하는 중...</div>
       <div class="snews-news-list" id="snewsNewsList" style="display:none"></div>
+    </div>
+    <div id="snewsHistoryTab" style="display:none">
+      <div style="position:relative;height:280px"><canvas id="snewsHistoryChart"></canvas></div>
+      <div id="snewsHistoryHint" style="font-size:11px;color:var(--muted);margin-top:8px"></div>
     </div>
     <div id="snewsSummaryTab" style="display:none">
       <div id="snewsSummaryContent" style="font-size:13px;line-height:1.7;color:var(--text)"></div>
@@ -770,14 +776,8 @@ tr:hover td{background:rgba(255,255,255,0.02)}
 // ══════════════════════════════════════════
 //  STATE
 // ══════════════════════════════════════════
-const DEFAULT_HOLDINGS = [
-  { id:1, ticker:'AAPL', name:'Apple Inc.', avgPrice:165.20, qty:30, currency:'USD', current:0, change:0, changePct:0, sector:'기술' },
-  { id:2, ticker:'NVDA', name:'NVIDIA Corp.', avgPrice:485.00, qty:10, currency:'USD', current:0, change:0, changePct:0, sector:'반도체' },
-  { id:3, ticker:'MSFT', name:'Microsoft Corp.', avgPrice:310.50, qty:15, currency:'USD', current:0, change:0, changePct:0, sector:'기술' },
-  { id:4, ticker:'005930.KS', name:'삼성전자', avgPrice:68000, qty:50, currency:'KRW', current:0, change:0, changePct:0, sector:'반도체' },
-  { id:5, ticker:'JPM', name:'JPMorgan Chase', avgPrice:155.00, qty:20, currency:'USD', current:0, change:0, changePct:0, sector:'금융' },
-];
-const DEFAULT_WATCHLIST = ['TSLA','BTC-USD','^IXIC'];
+const DEFAULT_HOLDINGS = [];
+const DEFAULT_WATCHLIST = [];
 let holdings = [...DEFAULT_HOLDINGS];
 let trades = {};
 let watchlist = [...DEFAULT_WATCHLIST];
@@ -797,6 +797,8 @@ let allNews = [];
 let newsFilter = 'all';
 const COLORS = ['#3b82f6','#22c55e','#f59e0b','#ef4444','#8b5cf6','#06b6d4','#f97316','#6b7280'];
 let tickerSuggestAbort = null;
+let dragHoldingId = null;
+let snewsHistoryChart = null;
 
 // Stock news panel state
 let snewsStockId = null;
@@ -865,9 +867,6 @@ function calcPL(h) {
 // 백엔드 서버 주소 (server.py)
 // 기존 localhost 고정은 모바일에서 "자기 폰의 localhost"로 해석되어 동기화가 실패할 수 있음.
 function resolveBackendUrl() {
-  const custom = (window.localStorage.getItem('folio_backend_url') || '').trim();
-  if (custom) return custom.replace(/\/$/, '');
-
   const { protocol, hostname } = window.location;
   if (hostname) {
     const safeProtocol = protocol === 'https:' ? 'https:' : 'http:';
@@ -1075,27 +1074,24 @@ async function fetchTickerSuggestions(query) {
 }
 
 async function refreshAll(options = {}) {
-  const { allowTickerFallback = true, persistSnapshot = true, suppressStatus = false } = options;
+  const { persistSnapshot = true, suppressStatus = false } = options;
   const icon = document.getElementById('refreshIcon');
   icon.classList.add('spin');
   const tickers = [...new Set([...holdings.map(h=>h.ticker),...watchlist])];
   const fxPromise = fetchFX();
   let pm = {};
-  // 배치 엔드포인트로 한 번에 조회 (서버에서 병렬 처리)
+  // DB(market_prev_close) 기반 전일 종가 조회
   if (BACKEND_URL && tickers.length) {
     try {
       const ctrl = new AbortController();
       const t = setTimeout(() => ctrl.abort(), 15000);
-      const r = await fetch(`${BACKEND_URL}/api/prices?tickers=${encodeURIComponent(tickers.join(','))}`, { signal: ctrl.signal });
+      const r = await fetch(`${BACKEND_URL}/api/market/prev-close?key=${encodeURIComponent(PORTFOLIO_SYNC_KEY)}&tickers=${encodeURIComponent(tickers.join(','))}`, { signal: ctrl.signal });
       clearTimeout(t);
-      if (r.ok) pm = await r.json();
+      if (r.ok) {
+        const j = await r.json();
+        pm = j.prices || {};
+      }
     } catch(e) { /* 서버 불가 시 개별 조회로 폴백 */ }
-  }
-  // 배치에서 누락된 티커는 개별 조회 (서버 없는 경우 포함)
-  const missing = tickers.filter(t => !pm[t]);
-  if (allowTickerFallback && missing.length) {
-    const results = await Promise.all(missing.map(t => fetchPrice(t)));
-    missing.forEach((t, i) => { pm[t] = results[i]; });
   }
   await fxPromise;
   holdings.forEach(h=>{
@@ -1568,8 +1564,7 @@ function renderAlloc() {
 function renderHoldings(filter='') {
   const q=filter.toLowerCase();
   const filtered=holdings
-    .filter(h=>h.ticker.toLowerCase().includes(q)||(h.name||'').toLowerCase().includes(q))
-    .sort((a,b)=>calcPL(b).mktKRW-calcPL(a).mktKRW);
+    .filter(h=>h.ticker.toLowerCase().includes(q)||(h.name||'').toLowerCase().includes(q));
   const body=document.getElementById('holdingsBody'),empty=document.getElementById('emptyHoldings');
   if(!filtered.length){body.innerHTML='';empty.style.display='';return;}
   empty.style.display='none';
@@ -1578,7 +1573,7 @@ function renderHoldings(filter='') {
     const up=pl>=0,dayUp=h.changePct>=0,hasCur=h.current>0;
     const cur=h.current||h.avgPrice;
     const tList=trades[h.id]||[];
-    return `<tr>
+    return `<tr class="holding-row" draggable="true" data-id="${h.id}">
       <td>
         <div class="stock-link" onclick="openStockNews(${h.id})">
           <div class="ticker-name">${dispTicker(h.ticker)}</div>
@@ -1596,8 +1591,40 @@ function renderHoldings(filter='') {
       <td><div class="row-actions"><button class="icon-btn" onclick="editHolding(${h.id})">수정</button><button class="icon-btn" onclick="delHolding(${h.id})">삭제</button></div></td>
     </tr>`;
   }).join('');
+  bindHoldingDnD();
 }
 function filterTable(){renderHoldings(document.getElementById('searchInput').value);}
+
+function bindHoldingDnD() {
+  const rows = document.querySelectorAll('#holdingsBody .holding-row');
+  rows.forEach(row => {
+    row.addEventListener('dragstart', () => {
+      dragHoldingId = Number(row.dataset.id);
+      row.classList.add('dragging');
+    });
+    row.addEventListener('dragend', () => {
+      row.classList.remove('dragging');
+    });
+    row.addEventListener('dragover', (e) => e.preventDefault());
+    row.addEventListener('drop', (e) => {
+      e.preventDefault();
+      const targetId = Number(row.dataset.id);
+      reorderHoldings(dragHoldingId, targetId);
+    });
+  });
+}
+
+function reorderHoldings(sourceId, targetId) {
+  if (!sourceId || !targetId || sourceId === targetId) return;
+  const sourceIdx = holdings.findIndex(h => h.id === sourceId);
+  const targetIdx = holdings.findIndex(h => h.id === targetId);
+  if (sourceIdx < 0 || targetIdx < 0) return;
+  const [moved] = holdings.splice(sourceIdx, 1);
+  holdings.splice(targetIdx, 0, moved);
+  holdings.forEach((h, idx) => { h.sortOrder = idx; });
+  saveData();
+  renderAll();
+}
 
 function renderMovers() {
   const sorted=[...holdings].filter(h=>h.current>0).sort((a,b)=>Math.abs(b.changePct)-Math.abs(a.changePct)).slice(0,6);
@@ -1632,6 +1659,7 @@ async function openStockNews(holdingId) {
   document.querySelectorAll('.snews-tabs .tab').forEach(t=>t.classList.remove('active'));
   document.querySelector('.snews-tabs .tab').classList.add('active');
   document.getElementById('snewsNewsTab').style.display='';
+  document.getElementById('snewsHistoryTab').style.display='none';
   document.getElementById('snewsSummaryTab').style.display='none';
   document.getElementById('snewsLoading').style.display='';
   document.getElementById('snewsNewsList').style.display='none';
@@ -1846,17 +1874,52 @@ function switchStockTab(tab, el) {
   el.classList.add('active');
   if (tab==='news') {
     document.getElementById('snewsNewsTab').style.display='';
+    document.getElementById('snewsHistoryTab').style.display='none';
     document.getElementById('snewsSummaryTab').style.display='none';
+  } else if (tab==='history') {
+    document.getElementById('snewsNewsTab').style.display='none';
+    document.getElementById('snewsHistoryTab').style.display='';
+    document.getElementById('snewsSummaryTab').style.display='none';
+    renderHoldingHistory();
   } else {
     document.getElementById('snewsNewsTab').style.display='none';
+    document.getElementById('snewsHistoryTab').style.display='none';
     document.getElementById('snewsSummaryTab').style.display='';
     renderSnewsSummary();
+  }
+}
+
+async function renderHoldingHistory() {
+  if (snewsStockId === null) return;
+  const h = holdings.find(x=>x.id===snewsStockId);
+  if (!h) return;
+  const hint = document.getElementById('snewsHistoryHint');
+  hint.textContent = '로딩 중...';
+  try {
+    const r = await fetch(`${BACKEND_URL}/api/portfolio/daily/holdings?key=${encodeURIComponent(PORTFOLIO_SYNC_KEY)}&ticker=${encodeURIComponent(h.ticker)}&days=365`);
+    const j = await r.json();
+    const items = Array.isArray(j.items) ? j.items : [];
+    const labels = items.map(x=>x.snapshot_date);
+    const series = items.map(x=>Number(x.return_pct || 0));
+    if (snewsHistoryChart) snewsHistoryChart.destroy();
+    snewsHistoryChart = new Chart(document.getElementById('snewsHistoryChart'), {
+      type:'line',
+      data:{labels,datasets:[{label:'누적 수익률(%)',data:series,borderColor:'#3b82f6',backgroundColor:'rgba(59,130,246,0.08)',fill:true,tension:0.25,pointRadius:0}]},
+      options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{x:{ticks:{maxTicksLimit:6,color:'#6b7280'}},y:{ticks:{color:'#6b7280'}}}}
+    });
+    hint.textContent = items.length ? `기준: 전일 종가 · ${items.length}개 데이터` : 'DB에 히스토리 데이터가 없습니다.';
+  } catch (e) {
+    hint.textContent = '히스토리 로드 실패';
   }
 }
 
 function closeStockNews() {
   document.getElementById('snewsPanel').classList.remove('open');
   document.getElementById('snewsOverlay').classList.remove('open');
+  if (snewsHistoryChart) {
+    snewsHistoryChart.destroy();
+    snewsHistoryChart = null;
+  }
   snewsStockId = null;
 }
 
@@ -2308,10 +2371,6 @@ async function loadRiskMetrics() {
     `).join('');
   };
 
-  const cachedRaw = localStorage.getItem('folio_risk_cache');
-  if (!riskMetricsCache && cachedRaw) {
-    try { riskMetricsCache = JSON.parse(cachedRaw); } catch(e) {}
-  }
   if (riskMetricsCache && riskMetricsCache.fingerprint === fingerprint && riskMetricsCache.metrics) {
     renderRiskCards(riskMetricsCache.metrics);
     status.textContent = `전일 기준 캐시 · ${baseDate}`;
@@ -2331,7 +2390,6 @@ async function loadRiskMetrics() {
     const m = j.metrics;
     renderRiskCards(m);
     riskMetricsCache = { fingerprint, metrics: m };
-    localStorage.setItem('folio_risk_cache', JSON.stringify(riskMetricsCache));
     status.textContent = `완료(전일 기준) · 종목 ${holdings.length}개`;
   } catch(e) {
     grid.innerHTML = `<div class="empty-state" style="grid-column:1/-1">지표 계산 실패: ${e.message}</div>`;
@@ -2408,7 +2466,7 @@ document.getElementById('dashDate').textContent=new Date().toLocaleDateString('k
   ];
   renderAll();
   // 초기 진입 속도를 위해 배치 API만 백그라운드 갱신 (개별 폴백/스냅샷 저장 생략)
-  refreshAll({ allowTickerFallback:false, persistSnapshot:false, suppressStatus:true });
+  refreshAll({ persistSnapshot:false, suppressStatus:true });
 })();
 </script>
 </body>

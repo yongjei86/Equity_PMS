@@ -30,6 +30,7 @@ create table if not exists public.holdings (
   current numeric not null default 0,
   change numeric not null default 0,
   change_pct numeric not null default 0,
+  sort_order int not null default 0,
   updated_at timestamptz not null default now(),
   primary key (portfolio_key, holding_id)
 );
@@ -84,18 +85,34 @@ create table if not exists public.holding_daily_snapshots (
   created_at timestamptz not null default now(),
   unique (portfolio_key, snapshot_date, holding_id, ticker)
 );
+
+create table if not exists public.portfolio_settings (
+  portfolio_key text primary key,
+  settings_json jsonb not null default '{}'::jsonb,
+  updated_at timestamptz not null default now()
+);
 ```
 
 ## 3) 동작 방식
 
 - 프론트엔드의 보유종목/거래내역/관심종목 수정사항은 `/api/portfolio/state`를 통해 Supabase `holdings`, `trades`, `watchlist`에 저장
 - 새로고침 시 `/api/portfolio/state`에서 같은 `portfolio_key`의 데이터를 다시 읽어서 렌더링하므로, 어떤 브라우저에서 접속해도 동일한 데이터 표시
+- 프론트엔드는 `/api/market/prev-close`로 DB(`market_prev_close`)에 적재된 전일 종가만 읽어서 화면에 표시
 - 프론트엔드가 가격 새로고침(`refreshAll`) 완료 후 `/api/portfolio/daily/snapshot` 호출
 - 백엔드가 현재 보유 종목 상태로 KRW 기준 평가액/손익 계산
 - Supabase `upsert`로 날짜 단위 누적 저장
 - 기간별 수익률은 `/api/portfolio/period-returns`에서 Supabase의 포트폴리오 일별 기준가(`total_market_krw`)를 기반으로 계산
-- 프론트엔드는 백엔드 DB 결과를 우선 사용하고, 백엔드 장애 시에만 로컬 백업 상태를 제한적으로 사용
+- 프론트엔드/백엔드 설정(appSettings, 벤치마크 등)도 `portfolio_settings`에 저장
 - 일별 스냅샷 데이터는 Supabase에 누적 저장되며, 필요 시 별도 화면/리포트에서 조회 가능
+
+## 5) 기본 Supabase 연결 정보
+
+서버(`server.py`)는 환경변수가 없을 때 아래 기본값으로 접속합니다.
+
+- URL: `https://iewzhfnalpqvlyaehvnq.supabase.co`
+- KEY: `sb_publishable_jew0PizzOC9CBB7_APnSzg_lE1i1yrP`
+
+운영 환경에서는 서비스 롤 키를 `SUPABASE_SERVICE_ROLE_KEY`로 별도 주입하는 방식을 권장합니다.
 
 ## 4) yfinance 전일 종가 → Supabase 적재 자동화
 
