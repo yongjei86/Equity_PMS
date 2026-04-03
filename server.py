@@ -38,9 +38,33 @@ INDEX_SYMBOL_MAP = {
     '^HSI': 'HSI',
 }
 
+KOREA_EXCHANGE_ALIASES = {'KRX', 'KOSPI', 'KO', 'KS', 'KOSDAQ', 'KQ'}
+
+
+def _normalize_ticker(ticker):
+    """입력 티커를 조회 친화적인 Yahoo/FDR 형태로 정규화."""
+    tk = (ticker or '').strip().upper()
+    if not tk:
+        return tk
+    if ':' in tk and not tk.startswith('^') and '=X' not in tk:
+        exchange, base = tk.split(':', 1)
+        if base.isdigit() and len(base) == 6 and exchange in KOREA_EXCHANGE_ALIASES:
+            if exchange in {'KQ', 'KOSDAQ'}:
+                return f'{base}.KQ'
+            return f'{base}.KS'
+        return f'{base}.{exchange}'
+    if '.' in tk and not tk.startswith('^') and '=X' not in tk:
+        base, exchange = tk.rsplit('.', 1)
+        if base.isdigit() and len(base) == 6 and exchange in {'KRX', 'KOSPI', 'KO'}:
+            return f'{base}.KS'
+    if tk.isdigit() and len(tk) == 6:
+        return f'{tk}.KS'
+    return tk
+
 
 def yf_to_finnhub(ticker):
     """Yahoo Finance 형식 → Finnhub 형식: 005930.KS → KS:005930"""
+    ticker = _normalize_ticker(ticker)
     if '.' in ticker and not ticker.startswith('^') and '=X' not in ticker:
         base, exchange = ticker.rsplit('.', 1)
         return f"{exchange}:{base}"
@@ -49,10 +73,15 @@ def yf_to_finnhub(ticker):
 
 def finnhub_to_yf(symbol):
     """Finnhub 형식 → Yahoo Finance 형식: KS:005930 → 005930.KS"""
+    symbol = (symbol or '').strip().upper()
     if ':' in symbol:
         exchange, base = symbol.split(':', 1)
+        if base.isdigit() and len(base) == 6 and exchange in KOREA_EXCHANGE_ALIASES:
+            if exchange in {'KQ', 'KOSDAQ'}:
+                return f'{base}.KQ'
+            return f'{base}.KS'
         return f"{base}.{exchange}"
-    return symbol
+    return _normalize_ticker(symbol)
 
 
 def _period_to_start_date(period):
@@ -81,16 +110,22 @@ def _period_to_start_date(period):
 
 
 def _yf_to_fdr_symbol(ticker):
+    ticker = _normalize_ticker(ticker)
     if ticker.startswith('^'):
         return INDEX_SYMBOL_MAP.get(ticker, ticker.replace('^', ''))
     if ticker.endswith('.KS') or ticker.endswith('.KQ'):
         return ticker.split('.')[0]
+    if '.' in ticker:
+        base = ticker.split('.')[0]
+        if base.isdigit() and len(base) == 6:
+            return base
     if '=X' in ticker:
         return None
     return ticker
 
 
 def _infer_currency(ticker):
+    ticker = _normalize_ticker(ticker)
     if ticker.endswith('.KS') or ticker.endswith('.KQ'):
         return 'KRW'
     if ticker.startswith('^KS') or ticker.startswith('^KQ'):
@@ -105,6 +140,7 @@ def _infer_currency(ticker):
 
 
 def _fetch_close_series_fdr(ticker, period='1y'):
+    ticker = _normalize_ticker(ticker)
     fdr_symbol = _yf_to_fdr_symbol(ticker)
     if not fdr_symbol:
         return None
@@ -142,6 +178,7 @@ def _fdr_price_data(ticker):
 
 
 def get_price_data(ticker):
+    ticker = _normalize_ticker(ticker)
     # 1순위: FinanceDataReader
     fdr_result = _fdr_price_data(ticker)
     if fdr_result is not None:
