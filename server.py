@@ -456,6 +456,162 @@ def _supabase_request(method, path, *, params=None, payload=None, prefer=None):
         return None, str(e)
 
 
+def _supabase_load_portfolio_state(key):
+    holdings_params = {
+        'portfolio_key': f'eq.{key}',
+        'select': 'holding_id,ticker,name,avg_price,qty,currency,sector,current,change,change_pct',
+        'order': 'holding_id.asc',
+        'limit': 5000,
+    }
+    holdings_data, holdings_err = _supabase_request('GET', 'holdings', params=holdings_params)
+    if holdings_err:
+        return None, holdings_err
+
+    trades_params = {
+        'portfolio_key': f'eq.{key}',
+        'select': 'trade_id,holding_id,trade_date,side,price,qty,memo',
+        'order': 'trade_date.desc',
+        'limit': 20000,
+    }
+    trades_data, trades_err = _supabase_request('GET', 'trades', params=trades_params)
+    if trades_err:
+        return None, trades_err
+
+    watchlist_params = {
+        'portfolio_key': f'eq.{key}',
+        'select': 'ticker',
+        'order': 'ticker.asc',
+        'limit': 1000,
+    }
+    watchlist_data, watchlist_err = _supabase_request('GET', 'watchlist', params=watchlist_params)
+    if watchlist_err:
+        return None, watchlist_err
+
+    holdings = []
+    for row in holdings_data if isinstance(holdings_data, list) else []:
+        if not isinstance(row, dict):
+            continue
+        holdings.append({
+            'id': _to_float(row.get('holding_id'), 0),
+            'ticker': (row.get('ticker') or '').upper(),
+            'name': row.get('name') or '',
+            'avgPrice': _to_float(row.get('avg_price'), 0),
+            'qty': _to_float(row.get('qty'), 0),
+            'currency': (row.get('currency') or 'USD').upper(),
+            'sector': row.get('sector') or '',
+            'current': _to_float(row.get('current'), 0),
+            'change': _to_float(row.get('change'), 0),
+            'changePct': _to_float(row.get('change_pct'), 0),
+        })
+
+    trade_map = {}
+    for row in trades_data if isinstance(trades_data, list) else []:
+        if not isinstance(row, dict):
+            continue
+        holding_id = str(row.get('holding_id') or '').strip()
+        if not holding_id:
+            continue
+        if holding_id not in trade_map:
+            trade_map[holding_id] = []
+        trade_map[holding_id].append({
+            'id': _to_float(row.get('trade_id'), 0),
+            'date': row.get('trade_date') or '',
+            'type': (row.get('side') or 'buy').lower(),
+            'price': _to_float(row.get('price'), 0),
+            'qty': _to_float(row.get('qty'), 0),
+            'memo': row.get('memo') or '',
+        })
+
+    watchlist = []
+    for row in watchlist_data if isinstance(watchlist_data, list) else []:
+        if not isinstance(row, dict):
+            continue
+        ticker = (row.get('ticker') or '').strip().upper()
+        if ticker:
+            watchlist.append(ticker)
+
+    return {
+        'holdings': holdings,
+        'trades': trade_map,
+        'watchlist': watchlist,
+        'appSettings': {},
+    }, None
+
+
+def _supabase_save_portfolio_state(key, state):
+    holdings = state.get('holdings') if isinstance(state.get('holdings'), list) else []
+    trades = state.get('trades') if isinstance(state.get('trades'), dict) else {}
+    watchlist = state.get('watchlist') if isinstance(state.get('watchlist'), list) else []
+
+    for table_name in ('holdings', 'trades', 'watchlist'):
+        _, del_err = _supabase_request(
+            'DELETE',
+            table_name,
+            params={'portfolio_key': f'eq.{key}'}
+        )
+        if del_err:
+            return del_err
+
+    holding_rows = []
+    for h in holdings:
+        if not isinstance(h, dict):
+            continue
+        holding_rows.append({
+            'portfolio_key': key,
+            'holding_id': str(h.get('id') or ''),
+            'ticker': (h.get('ticker') or '').upper(),
+            'name': h.get('name') or '',
+            'avg_price': _to_float(h.get('avgPrice'), 0),
+            'qty': _to_float(h.get('qty'), 0),
+            'currency': (h.get('currency') or 'USD').upper(),
+            'sector': h.get('sector') or '',
+            'current': _to_float(h.get('current'), 0),
+            'change': _to_float(h.get('change'), 0),
+            'change_pct': _to_float(h.get('changePct'), 0),
+        })
+    if holding_rows:
+        _, holdings_err = _supabase_request('POST', 'holdings', payload=holding_rows)
+        if holdings_err:
+            return holdings_err
+
+    trade_rows = []
+    for holding_id, trade_list in trades.items():
+        if not isinstance(trade_list, list):
+            continue
+        for t in trade_list:
+            if not isinstance(t, dict):
+                continue
+            trade_rows.append({
+                'portfolio_key': key,
+                'trade_id': str(t.get('id') or ''),
+                'holding_id': str(holding_id),
+                'trade_date': t.get('date') or '',
+                'side': (t.get('type') or 'buy').lower(),
+                'price': _to_float(t.get('price'), 0),
+                'qty': _to_float(t.get('qty'), 0),
+                'memo': t.get('memo') or '',
+            })
+    if trade_rows:
+        _, trades_err = _supabase_request('POST', 'trades', payload=trade_rows)
+        if trades_err:
+            return trades_err
+
+    watchlist_rows = []
+    for t in watchlist:
+        ticker = str(t or '').strip().upper()
+        if ticker:
+            watchlist_rows.append({
+                'portfolio_key': key,
+                'ticker': ticker,
+            })
+    if watchlist_rows:
+        _, watchlist_err = _supabase_request('POST', 'watchlist', payload=watchlist_rows)
+        if watchlist_err:
+            return watchlist_err
+
+    return None
+
+
 def _to_krw(amount, currency, fx_rates, usd_krw):
     cur = (currency or 'USD').upper()
     if cur == 'KRW':
@@ -840,6 +996,11 @@ def portfolio_metrics():
 @app.route('/api/portfolio/state', methods=['GET'])
 def get_portfolio_state():
     key = (request.args.get('key') or 'default').strip() or 'default'
+    if _supabase_enabled():
+        state, err = _supabase_load_portfolio_state(key)
+        if err:
+            return jsonify({'ok': False, 'error': err, 'state': None}), 500
+        return jsonify({'ok': True, 'state': state}), 200
     with STATE_LOCK:
         all_states = load_state()
         state = all_states.get(key)
@@ -859,6 +1020,11 @@ def set_portfolio_state():
         'watchlist': state.get('watchlist') if isinstance(state.get('watchlist'), list) else [],
         'appSettings': state.get('appSettings') if isinstance(state.get('appSettings'), dict) else {},
     }
+    if _supabase_enabled():
+        err = _supabase_save_portfolio_state(key, safe_state)
+        if err:
+            return jsonify({'ok': False, 'error': err}), 500
+        return jsonify({'ok': True}), 200
     with STATE_LOCK:
         all_states = load_state()
         all_states[key] = safe_state
