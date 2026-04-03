@@ -4,6 +4,7 @@ import FinanceDataReader as fdr
 import numpy as np
 import pandas as pd
 import requests
+import yfinance as yf
 import os
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
@@ -13,13 +14,11 @@ app = Flask(__name__)
 CORS(app)
 ALPHA_VANTAGE_API_KEY = os.environ.get('ALPHA_VANTAGE_API_KEY', 'M23I4O2KN7VDGIL8')
 ALPHA_VANTAGE_BASE = 'https://www.alphavantage.co/query'
-DEFAULT_SUPABASE_URL = 'https://iewzhfnalpqvlyaehvnq.supabase.co'
-DEFAULT_SUPABASE_KEY = 'sb_publishable_jew0PizzOC9CBB7_APnSzg_lE1i1yrP'
-SUPABASE_URL = (os.environ.get('SUPABASE_URL') or DEFAULT_SUPABASE_URL).rstrip('/')
+SUPABASE_URL = (os.environ.get('SUPABASE_URL') or '').rstrip('/')
 SUPABASE_SERVICE_ROLE_KEY = (
     os.environ.get('SUPABASE_SERVICE_ROLE_KEY')
     or os.environ.get('SUPABASE_KEY')
-    or DEFAULT_SUPABASE_KEY
+    or ''
 )
 
 # 거래소 코드 → 통화 매핑
@@ -308,7 +307,24 @@ def _infer_currency(ticker):
 
 def _fetch_close_series_fdr(ticker, period='1y'):
     ticker = _normalize_ticker(ticker)
-    # 1순위: Yahoo Finance chart (한국/해외 공통, 안정적)
+    # 1순위: yfinance history
+    try:
+        hist = yf.Ticker(ticker).history(period=period, interval='1d', auto_adjust=False)
+        if hist is not None and not hist.empty and 'Close' in hist.columns:
+            close = hist['Close'].dropna()
+            if close is not None and not close.empty:
+                if getattr(close.index, 'tz', None) is not None:
+                    close.index = close.index.tz_localize(None)
+                close = _latest_market_close(close)
+                start = _period_to_start_date(period)
+                close = close[close.index.date >= start]
+                if close is not None and not close.empty:
+                    close.name = ticker
+                    return close
+    except Exception:
+        pass
+
+    # 2순위: Yahoo Finance chart (직접 API)
     yahoo_data = _fetch_yahoo_chart_json(ticker, range_param=period, interval='1d')
     yahoo_series = _parse_yahoo_close_series(yahoo_data, ticker) if yahoo_data else None
     if yahoo_series is not None and not yahoo_series.empty:
@@ -318,7 +334,7 @@ def _fetch_close_series_fdr(ticker, period='1y'):
             yahoo_series.name = ticker
             return yahoo_series
 
-    # 2순위: Alpha Vantage daily
+    # 3순위: Alpha Vantage daily
     alpha_symbol = _ticker_to_alpha_symbol(ticker)
     if not alpha_symbol:
         return None
@@ -367,17 +383,43 @@ def _fdr_price_data(ticker):
 
 def get_price_data(ticker):
     ticker = _normalize_ticker(ticker)
-    # 1순위: Yahoo Finance chart API
+    # 1순위: yfinance
+    try:
+        hist = yf.Ticker(ticker).history(period='10d', interval='1d', auto_adjust=False)
+        if hist is not None and not hist.empty and 'Close' in hist.columns:
+            close = hist['Close'].dropna()
+            if close is not None and len(close) >= 1:
+                if getattr(close.index, 'tz', None) is not None:
+                    close.index = close.index.tz_localize(None)
+                close = _latest_market_close(close)
+                if close is not None and len(close) >= 1:
+                    price = float(close.iloc[-1])
+                    prev = float(close.iloc[-2]) if len(close) >= 2 else price
+                    change = price - prev
+                    change_pct = (change / prev * 100) if prev else 0
+                    currency = _infer_currency(ticker)
+                    return {
+                        'price': round(price, 6),
+                        'change': round(change, 6),
+                        'changePct': round(change_pct, 4),
+                        'name': ticker,
+                        'currency': currency,
+                        'ok': True,
+                    }
+    except Exception:
+        pass
+
+    # 2순위: Yahoo Finance chart API
     yahoo_result = _yahoo_price_data(ticker)
     if yahoo_result is not None:
         return yahoo_result
 
-    # 2순위: Alpha Vantage Daily 기반 전일 종가
+    # 3순위: Alpha Vantage Daily 기반 전일 종가
     fdr_result = _fdr_price_data(ticker)
     if fdr_result is not None:
         return fdr_result
 
-    # 3순위: Global Quote (응답 축소 시)
+    # 4순위: Global Quote (응답 축소 시)
     try:
         alpha_symbol = _ticker_to_alpha_symbol(ticker)
         data = _alpha_vantage_query({'function': 'GLOBAL_QUOTE', 'symbol': alpha_symbol})
@@ -503,7 +545,10 @@ def _supabase_request(method, path, *, params=None, payload=None, prefer=None):
             timeout=10
         )
         if not resp.ok:
-            return None, f'Supabase API 오류({resp.status_code}): {resp.text[:200]}'
+            hint = ''
+            if resp.status_code in (401, 403):
+                hint = ' (SUPABASE_SERVICE_ROLE_KEY가 누락/오류이거나 RLS 정책 문제일 수 있습니다)'
+            return None, f'Supabase API 오류({resp.status_code}): {resp.text[:200]}{hint}'
         if not resp.text:
             return None, None
         return resp.json(), None
