@@ -1,12 +1,14 @@
 from flask import Flask, jsonify, request
 from flask_cors import CORS
-import yfinance as yf
+import FinanceDataReader as fdr
 import numpy as np
+import pandas as pd
 import requests
 import os
 import json
 from threading import Lock
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta
 
 app = Flask(__name__)
 CORS(app)
@@ -26,12 +28,24 @@ EXCHANGE_CURRENCY = {
     'SS': 'CNY', 'SZ': 'CNY',
 }
 
+INDEX_SYMBOL_MAP = {
+    '^GSPC': 'US500',
+    '^IXIC': 'IXIC',
+    '^DJI': 'DJI',
+    '^KS11': 'KS11',
+    '^KQ11': 'KQ11',
+    '^N225': 'JP225',
+    '^HSI': 'HSI',
+}
+
+
 def yf_to_finnhub(ticker):
     """Yahoo Finance 형식 → Finnhub 형식: 005930.KS → KS:005930"""
     if '.' in ticker and not ticker.startswith('^') and '=X' not in ticker:
         base, exchange = ticker.rsplit('.', 1)
         return f"{exchange}:{base}"
     return ticker
+
 
 def finnhub_to_yf(symbol):
     """Finnhub 형식 → Yahoo Finance 형식: KS:005930 → 005930.KS"""
@@ -40,33 +54,101 @@ def finnhub_to_yf(symbol):
         return f"{base}.{exchange}"
     return symbol
 
-def _yf_price_fallback(ticker):
-    """yfinance fast_info로 가격 조회 (Finnhub 실패 시 폴백)"""
+
+def _period_to_start_date(period):
+    now = datetime.utcnow().date()
+    if period == '5d':
+        return now - timedelta(days=10)
+    if period == '1mo':
+        return now - timedelta(days=45)
+    if period == '3mo':
+        return now - timedelta(days=120)
+    if period == '6mo':
+        return now - timedelta(days=240)
+    if period == '1y':
+        return now - timedelta(days=380)
+    if period == '2y':
+        return now - timedelta(days=760)
+    if period == '5y':
+        return now - timedelta(days=1900)
+    if period == '10y':
+        return now - timedelta(days=3800)
+    if period == 'ytd':
+        return datetime(now.year, 1, 1).date()
+    if period == 'max':
+        return datetime(1990, 1, 1).date()
+    return now - timedelta(days=380)
+
+
+def _yf_to_fdr_symbol(ticker):
+    if ticker.startswith('^'):
+        return INDEX_SYMBOL_MAP.get(ticker, ticker.replace('^', ''))
+    if ticker.endswith('.KS') or ticker.endswith('.KQ'):
+        return ticker.split('.')[0]
+    if '=X' in ticker:
+        return None
+    return ticker
+
+
+def _infer_currency(ticker):
+    if ticker.endswith('.KS') or ticker.endswith('.KQ'):
+        return 'KRW'
+    if ticker.startswith('^KS') or ticker.startswith('^KQ'):
+        return 'KRW'
+    if ticker.endswith('.T'):
+        return 'JPY'
+    if ticker.endswith('.L'):
+        return 'GBP'
+    if ticker.endswith('.HK'):
+        return 'HKD'
+    return 'USD'
+
+
+def _fetch_close_series_fdr(ticker, period='1y'):
+    fdr_symbol = _yf_to_fdr_symbol(ticker)
+    if not fdr_symbol:
+        return None
+    start = _period_to_start_date(period)
+    end = datetime.utcnow().date()
+    df = fdr.DataReader(fdr_symbol, start=start, end=end)
+    if df is None or df.empty or 'Close' not in df.columns:
+        return None
+    s = df['Close'].dropna()
+    if s.empty:
+        return None
+    s.name = ticker
+    return s
+
+
+def _fdr_price_data(ticker):
     try:
-        t = yf.Ticker(ticker)
-        info = t.fast_info
-        price = info.last_price
-        prev = info.previous_close
-        if price is None or prev is None:
+        close = _fetch_close_series_fdr(ticker, period='1mo')
+        if close is None or len(close) < 2:
             return None
+        price = float(close.iloc[-1])
+        prev = float(close.iloc[-2])
         change = price - prev
         change_pct = (change / prev) * 100 if prev else 0
-        currency = (getattr(info, 'currency', None) or 'USD').upper()
         return {
             'price': round(price, 6),
             'change': round(change, 6),
             'changePct': round(change_pct, 4),
             'name': ticker,
-            'currency': currency,
+            'currency': _infer_currency(ticker),
             'ok': True,
         }
     except Exception:
         return None
 
-def get_price_data(ticker):
-    # FX(=X), 지수(^)는 yfinance가 더 정확 — Finnhub 패스
-    use_finnhub = FINNHUB_API_KEY and '=X' not in ticker and not ticker.startswith('^')
 
+def get_price_data(ticker):
+    # 1순위: FinanceDataReader
+    fdr_result = _fdr_price_data(ticker)
+    if fdr_result is not None:
+        return fdr_result
+
+    # 2순위: Finnhub (FDR 미지원 티커 폴백)
+    use_finnhub = FINNHUB_API_KEY and '=X' not in ticker and not ticker.startswith('^')
     if use_finnhub:
         try:
             fh_symbol = yf_to_finnhub(ticker)
@@ -78,11 +160,10 @@ def get_price_data(ticker):
             if r.ok:
                 d = r.json()
                 price = d.get('c', 0)
-                prev  = d.get('pc', 0)
+                prev = d.get('pc', 0)
                 if price and price > 0:
                     change = price - prev
                     change_pct = (change / prev * 100) if prev else 0
-                    # 통화는 거래소 코드로 추론
                     exchange = fh_symbol.split(':')[0] if ':' in fh_symbol else 'US'
                     currency = EXCHANGE_CURRENCY.get(exchange, 'USD')
                     return {
@@ -96,7 +177,7 @@ def get_price_data(ticker):
         except Exception:
             pass
 
-    return _yf_price_fallback(ticker)
+    return None
 
 
 def _to_float(value, default=0.0):
@@ -156,42 +237,41 @@ def calculate_portfolio_metrics(tickers, weights=None, period='1y', benchmark='^
         return {'error': f'invalid period. allowed: {sorted(valid_periods)}'}, 400
 
     try:
-        close_prices = yf.download(
-            tickers=clean_tickers,
-            period=period,
-            interval='1d',
-            auto_adjust=True,
-            progress=False
-        )['Close']
+        close_map = {}
+        for t in clean_tickers:
+            series = _fetch_close_series_fdr(t, period=period)
+            if series is not None and len(series) > 2:
+                close_map[t] = series
+        if not close_map:
+            return {'error': '가격 데이터를 가져오지 못했습니다.'}, 500
+        close_prices = pd.concat(close_map.values(), axis=1)
+        close_prices.columns = list(close_map.keys())
+        available_tickers = list(close_map.keys())
     except Exception:
         return {'error': '가격 데이터를 가져오지 못했습니다.'}, 500
 
     if close_prices is None or len(close_prices) == 0:
         return {'error': '가격 데이터가 비어 있습니다.'}, 404
 
-    if len(clean_tickers) == 1:
-        close_prices = close_prices.to_frame(name=clean_tickers[0])
-    else:
+    if set(clean_tickers).issubset(set(close_prices.columns)):
+        available_tickers = clean_tickers
         close_prices = close_prices[clean_tickers]
 
+    ticker_to_weight = dict(zip(clean_tickers, weights_arr))
+    aligned_weights = np.array([ticker_to_weight[t] for t in available_tickers], dtype=float)
+    aligned_weights = aligned_weights / aligned_weights.sum()
     close_prices = close_prices.dropna(how='any')
     if close_prices.empty or len(close_prices) < 3:
         return {'error': '지표 계산을 위한 데이터가 충분하지 않습니다.'}, 422
 
     returns = close_prices.pct_change().dropna(how='any')
-    portfolio_returns = (returns * weights_arr).sum(axis=1)
+    portfolio_returns = (returns * aligned_weights).sum(axis=1)
 
     benchmark_returns = None
     benchmark_period_return = None
     try:
-        bench_close = yf.download(
-            tickers=benchmark,
-            period=period,
-            interval='1d',
-            auto_adjust=True,
-            progress=False
-        )['Close'].dropna()
-        if len(bench_close) > 2:
+        bench_close = _fetch_close_series_fdr(benchmark, period=period)
+        if bench_close is not None and len(bench_close) > 2:
             benchmark_returns = bench_close.pct_change().dropna()
             benchmark_period_return = _to_float(bench_close.iloc[-1] / bench_close.iloc[0] - 1)
     except Exception:
@@ -249,8 +329,8 @@ def calculate_portfolio_metrics(tickers, weights=None, period='1y', benchmark='^
     result = {
         'ok': True,
         'inputs': {
-            'tickers': clean_tickers,
-            'weights': [round(float(x), 6) for x in weights_arr.tolist()],
+            'tickers': available_tickers,
+            'weights': [round(float(x), 6) for x in aligned_weights.tolist()],
             'period': period,
             'benchmark': benchmark,
             'riskFreeRate': round(annual_rf, 6),
@@ -309,11 +389,10 @@ def history(ticker):
     if range_param not in {'5d', '1mo', '3mo', 'ytd', '1y'}:
         return jsonify({'error': 'invalid range'}), 400
     try:
-        t = yf.Ticker(ticker)
-        hist = t.history(period=range_param)
-        if hist.empty:
+        close = _fetch_close_series_fdr(ticker, period=range_param)
+        if close is None or close.empty:
             return jsonify({'startPrice': None})
-        start_price = float(hist['Close'].dropna().iloc[0])
+        start_price = float(close.iloc[0])
         return jsonify({'startPrice': round(start_price, 6)})
     except Exception:
         return jsonify({'startPrice': None})
@@ -322,28 +401,25 @@ def history(ticker):
 @app.route('/api/news/<path:ticker>')
 def news(ticker):
     try:
-        t = yf.Ticker(ticker)
-        raw = t.news
-        if not raw:
-            return jsonify([])
+        # FinanceDataReader는 뉴스 API를 제공하지 않아 Yahoo 검색 API 사용
+        resp = requests.get(
+            'https://query2.finance.yahoo.com/v1/finance/search',
+            params={'q': ticker, 'quotesCount': 0, 'newsCount': 10,
+                    'enableFuzzyQuery': 'true', 'lang': 'en-US'},
+            timeout=6
+        )
+        resp.raise_for_status()
+        raw_news = resp.json().get('news', []) or []
         articles = []
-        for item in raw[:10]:
-            content = item.get('content', {})
-            title = content.get('title') or item.get('title', '')
-            url = (content.get('canonicalUrl', {}) or {}).get('url') or \
-                  (content.get('clickThroughUrl', {}) or {}).get('url') or \
-                  item.get('link', '')
-            provider = (content.get('provider', {}) or {}).get('displayName') or \
-                       item.get('publisher', '')
-            pub_time = content.get('pubDate') or item.get('providerPublishTime')
+        for item in raw_news[:10]:
+            title = item.get('title', '')
+            url = item.get('link', '')
+            provider = item.get('publisher', '')
+            pub_time = item.get('providerPublishTime')
             if pub_time:
-                import datetime
                 try:
-                    if isinstance(pub_time, (int, float)):
-                        dt = datetime.datetime.fromtimestamp(pub_time)
-                    else:
-                        dt = datetime.datetime.fromisoformat(pub_time.replace('Z', '+00:00'))
-                    diff = datetime.datetime.now(datetime.timezone.utc) - dt.astimezone(datetime.timezone.utc)
+                    dt = datetime.fromtimestamp(pub_time)
+                    diff = datetime.utcnow() - dt
                     hours = int(diff.total_seconds() // 3600)
                     time_str = f'{hours}시간 전' if hours < 24 else f'{hours // 24}일 전'
                 except Exception:
@@ -360,7 +436,7 @@ def news(ticker):
                     'sentiment': 'neu',
                 })
         return jsonify(articles)
-    except Exception as e:
+    except Exception:
         return jsonify([])
 
 
