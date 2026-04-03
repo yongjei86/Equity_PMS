@@ -7,6 +7,7 @@ import requests
 import os
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
+import time
 
 app = Flask(__name__)
 CORS(app)
@@ -49,6 +50,8 @@ INDEX_SYMBOL_MAP = {
 
 KOREA_EXCHANGE_ALIASES = {'KRX', 'KOSPI', 'KO', 'KS', 'KOSDAQ', 'KQ'}
 YAHOO_CHART_HOSTS = ('query1.finance.yahoo.com', 'query2.finance.yahoo.com')
+PREV_CLOSE_CACHE_TTL_SECONDS = 20
+_PREV_CLOSE_CACHE = {}
 
 
 def _normalize_ticker(ticker):
@@ -1039,6 +1042,12 @@ def get_market_prev_close():
     if not tickers:
         return jsonify({'ok': True, 'prices': {}}), 200
 
+    cache_key = f'{key}|' + ','.join(sorted(set(tickers)))
+    now_ts = time.time()
+    cached = _PREV_CLOSE_CACHE.get(cache_key)
+    if cached and (now_ts - cached.get('ts', 0) <= PREV_CLOSE_CACHE_TTL_SECONDS):
+        return jsonify({'ok': True, 'prices': cached.get('prices', {}), 'cached': True}), 200
+
     in_clause = '(' + ','.join([f'"{t}"' for t in tickers]) + ')'
     rows, err = _supabase_request(
         'GET',
@@ -1071,7 +1080,8 @@ def get_market_prev_close():
             'ok': close_price > 0,
             'marketDate': row.get('market_date'),
         }
-    return jsonify({'ok': True, 'prices': by_ticker}), 200
+    _PREV_CLOSE_CACHE[cache_key] = {'ts': now_ts, 'prices': by_ticker}
+    return jsonify({'ok': True, 'prices': by_ticker, 'cached': False}), 200
 
 
 @app.route('/api/portfolio/state', methods=['POST'])
