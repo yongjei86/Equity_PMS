@@ -106,14 +106,14 @@ create table if not exists public.portfolio_settings (
 - 일별 스냅샷 데이터는 Supabase에 누적 저장되며, 필요 시 별도 화면/리포트에서 조회 가능
 - 즉, **시장 기초 데이터는 외부 API**, **사용자 개인 데이터(매수가/수량/매수일 등)는 Supabase**에 저장하는 하이브리드 방식을 사용
 
-## 5) 기본 Supabase 연결 정보
+## 5) Supabase 연결 주의사항
 
-서버(`server.py`)는 환경변수가 없을 때 아래 기본값으로 접속합니다.
+서버(`server.py`)는 반드시 아래 환경 변수가 설정되어야 Supabase에 연결됩니다.
 
-- URL: `https://iewzhfnalpqvlyaehvnq.supabase.co`
-- KEY: `sb_publishable_jew0PizzOC9CBB7_APnSzg_lE1i1yrP`
+- `SUPABASE_URL`
+- `SUPABASE_SERVICE_ROLE_KEY` (또는 `SUPABASE_KEY`)
 
-운영 환경에서는 서비스 롤 키를 `SUPABASE_SERVICE_ROLE_KEY`로 별도 주입하는 방식을 권장합니다.
+`publishable/anon` 키로는 `holdings`, `trades`, `watchlist` 쓰기/삭제가 RLS 정책에 의해 차단될 수 있으므로, 백엔드에서는 서비스 롤 키 사용을 권장합니다.
 
 ## 4) yfinance 전일 종가 → Supabase 적재 자동화
 
