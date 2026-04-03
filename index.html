@@ -409,6 +409,7 @@ tr:hover td{background:rgba(255,255,255,0.02)}
               <button class="tab active" onclick="switchPeriod('1M',this)">1M</button>
               <button class="tab" onclick="switchPeriod('3M',this)">3M</button>
               <button class="tab" onclick="switchPeriod('6M',this)">6M</button>
+              <button class="tab" onclick="switchPeriod('YTD',this)">YTD</button>
               <button class="tab" onclick="switchPeriod('1Y',this)">1Y</button>
             </div>
             <button class="icon-btn" onclick="openBenchmarkSettings()" title="벤치마크 설정" style="font-size:13px">⚙</button>
@@ -840,8 +841,17 @@ function fmtKRW(krw) {
 }
 function fmtNum(n,d=2) { return n.toLocaleString('en-US',{minimumFractionDigits:d,maximumFractionDigits:d}); }
 function fmtPct(n) { return (n>=0?'+':'')+n.toFixed(2)+'%'; }
+function getReferenceClosePrice(h) {
+  if (Number.isFinite(h.current) && h.current > 0 && Number.isFinite(h.change)) {
+    const prevClose = h.current - h.change;
+    if (Number.isFinite(prevClose) && prevClose > 0) return prevClose;
+  }
+  if (Number.isFinite(h.current) && h.current > 0) return h.current;
+  return h.avgPrice;
+}
 function calcPL(h) {
-  const cur = h.current || h.avgPrice;
+  // 전반적인 수익률/평가는 "전일 종가(또는 가장 최근 거래일 종가)" 기준으로 계산
+  const cur = getReferenceClosePrice(h);
   const costKRW = toKRW(h.avgPrice * h.qty, h.currency);
   const mktKRW  = toKRW(cur * h.qty, h.currency);
   const pl = mktKRW - costKRW;
@@ -949,6 +959,7 @@ function toFinnhubTicker(ticker) {
 }
 
 async function fetchPrice(ticker) {
+  if (/^\d{6}$/.test(ticker)) ticker = `${ticker}.KS`;
   // 1순위: 로컬 백엔드 서버 (server.py, Finnhub 사용) — 5s 타임아웃
   if (BACKEND_URL) {
     try {
@@ -1108,6 +1119,9 @@ let dailyBaseTradingDate = null;
 let dailyBenchmarkBasePrice = null;
 let dailyBenchmarkTradingDate = null;
 let sp500Snapshot = null;
+let periodLoadInFlight = null;
+let periodLoadDate = null;
+let riskMetricsCache = null;
 const KST_OFFSET_MS = 9 * 60 * 60 * 1000;
 const KST_CUTOFF_HOUR = 9; // 한국 개장 기준
 const PERIOD_RANGE_MAP = { '1w':'5d', '1m':'1mo', '3m':'3mo', 'ytd':'ytd' };
@@ -1303,15 +1317,15 @@ async function fetchSp500StartPrice(rangeKey) {
 
 function calcSp500Return(periodKey) {
   if (periodKey === 'cost') return null;
+  const currentRef = (Number.isFinite(sp500Snapshot?.price) && Number.isFinite(sp500Snapshot?.change))
+    ? (sp500Snapshot.price - sp500Snapshot.change)
+    : sp500Snapshot?.price;
   if (periodKey === '1d') {
-    const directPct = sp500Snapshot?.changePct;
-    if (Number.isFinite(directPct)) return directPct;
-    const cur = sp500Snapshot?.price;
-    if (!Number.isFinite(cur) || !Number.isFinite(dailyBenchmarkBasePrice) || dailyBenchmarkBasePrice <= 0) return null;
-    return ((cur - dailyBenchmarkBasePrice) / dailyBenchmarkBasePrice) * 100;
+    if (!Number.isFinite(currentRef) || !Number.isFinite(dailyBenchmarkBasePrice) || dailyBenchmarkBasePrice <= 0) return null;
+    return ((currentRef - dailyBenchmarkBasePrice) / dailyBenchmarkBasePrice) * 100;
   }
   const start = benchmarkStartPrices[periodKey];
-  const cur = sp500Snapshot?.price;
+  const cur = currentRef;
   if (!start || !cur) return null;
   return ((cur - start) / start) * 100;
 }
@@ -1320,26 +1334,20 @@ function calcPeriodGain(period) {
   let gain=0, startValue=0;
   holdings.forEach(h=>{
     const {costKRW,mktKRW}=calcPL(h);
+    const refClose = getReferenceClosePrice(h);
     if (period==='1d') {
-      if (Number.isFinite(h.change) && Number.isFinite(h.current)) {
-        const base = h.current - h.change;
-        if (base > 0) {
-          gain += toKRW(h.change * h.qty, h.currency);
-          startValue += toKRW(base * h.qty, h.currency);
-          return;
-        }
-      }
       const base = dailyBasePrices?.[h.ticker];
-      if (Number.isFinite(base) && base > 0 && Number.isFinite(h.current)) {
-        gain += toKRW((h.current - base) * h.qty, h.currency);
+      if (Number.isFinite(base) && base > 0 && Number.isFinite(refClose)) {
+        gain += toKRW((refClose - base) * h.qty, h.currency);
         startValue += toKRW(base * h.qty, h.currency);
+        return;
       }
     } else if (period==='cost') {
       gain+=mktKRW-costKRW; startValue+=costKRW;
     } else {
       const sp=periodStartPrices[period]||{};
       const s=sp[h.ticker];
-      if (s&&h.current) { gain+=toKRW((h.current-s)*h.qty,h.currency); startValue+=toKRW(s*h.qty,h.currency); }
+      if (s&&refClose) { gain+=toKRW((refClose-s)*h.qty,h.currency); startValue+=toKRW(s*h.qty,h.currency); }
     }
   });
   const pct=startValue>0?(gain/startValue)*100:null;
@@ -1354,10 +1362,19 @@ function renderMetrics() {
     <div class="metric"><div class="metric-label">총 평가액</div><div class="metric-value">${fmtOk(totalMkt)}</div><div class="metric-change neutral">${holdings.length}개 종목 · ${fmtM(totalMkt)}</div></div>
     <div class="metric"><div class="metric-label">투자 원금</div><div class="metric-value">${fmtOk(totalCost)}</div><div class="metric-change neutral">환율 ${usdKrw.toLocaleString('ko-KR',{maximumFractionDigits:0})}원 · ${fmtM(totalCost)}</div></div>`;
   renderPeriodTables();
-  loadAllPeriods();
+  scheduleLoadAllPeriods();
 }
 
-async function loadAllPeriods() {
+function scheduleLoadAllPeriods() {
+  const todayKey = activeKstTradingDateStr();
+  if (periodLoadDate === todayKey && !periodLoadInFlight) return;
+  if (periodLoadInFlight) return;
+  periodLoadInFlight = loadAllPeriods(todayKey).finally(() => {
+    periodLoadInFlight = null;
+  });
+}
+
+async function loadAllPeriods(todayKey = activeKstTradingDateStr()) {
   const el = document.getElementById('returnsStatus');
   el.textContent='조회 중…';
   await Promise.all([fetchSp500Snapshot(), fetchDailyBasePrices(), fetchSp500DailyBasePrice()]);
@@ -1367,6 +1384,7 @@ async function loadAllPeriods() {
     await Promise.all([fetchStartPrices(p), fetchSp500StartPrice(p)]);
     updateReturnsRow(p);
   }
+  periodLoadDate = todayKey;
   el.textContent='';
 }
 
@@ -1428,14 +1446,15 @@ function renderDashHoldings() {
 }
 
 function generatePerf(period) {
-  const pts={'1M':30,'3M':90,'6M':180,'1Y':365}[period]||30;
+  const now = new Date();
+  const ytdDays = Math.max(1, Math.floor((now - new Date(now.getFullYear(), 0, 1)) / (1000*60*60*24)));
+  const pts={'1M':30,'3M':90,'6M':180,'YTD':ytdDays,'1Y':365}[period]||30;
   const labels=[],portfolio=[];
   let pv=100,drift=0.08;
   if(holdings.length){let c=0,m=0;holdings.forEach(h=>{const p=calcPL(h);c+=p.costKRW;m+=p.mktKRW;});drift=c>0?(m-c)/c*100/pts:0.08;}
   const benchmarks=appSettings.benchmarks||[];
   const bvArr=benchmarks.map(()=>100);
   const benchData=benchmarks.map(()=>[]);
-  const now=new Date();
   for(let i=pts;i>=0;i--){
     const d=new Date(now);d.setDate(d.getDate()-i);
     if(d.getDay()===0||d.getDay()===6) continue;
@@ -2134,7 +2153,8 @@ function openModal(id=null){
 function closeModal(){document.getElementById('modalBackdrop').classList.remove('open');editId=null;_fullTicker=null;clearTimeout(tickerTimeout);clearTimeout(priceTimeout);}
 function closeModalOutside(e){if(e.target===document.getElementById('modalBackdrop'))closeModal();}
 async function saveHolding(){
-  const ticker=(_fullTicker||document.getElementById('fTicker').value.trim()).toUpperCase();
+  let ticker=(_fullTicker||document.getElementById('fTicker').value.trim()).toUpperCase();
+  if (/^\d{6}$/.test(ticker)) ticker = `${ticker}.KS`;
   const name=document.getElementById('fName').value.trim()||ticker;
   const avgPrice=parseFloat(document.getElementById('fPrice').value);
   const qty=parseFloat(document.getElementById('fQty').value);
@@ -2212,17 +2232,16 @@ async function loadRiskMetrics() {
     benchmark: (document.getElementById('riskBenchmark').value.trim() || '^GSPC').toUpperCase(),
     riskFreeRate: 0.03
   };
-  grid.innerHTML = '<div class="empty-state" style="grid-column:1/-1">지표 계산 중...</div>';
-  status.textContent = `${payload.period} / ${payload.benchmark}`;
-  try {
-    const r = await fetch(`${BACKEND_URL}/api/portfolio/metrics`, {
-      method: 'POST',
-      headers: {'Content-Type':'application/json'},
-      body: JSON.stringify(payload)
-    });
-    const j = await r.json();
-    if (!r.ok || !j.ok || !j.metrics) throw new Error(j.error || '지표 계산 실패');
-    const m = j.metrics;
+  const baseDate = activeKstTradingDateStr();
+  const fingerprint = JSON.stringify({
+    baseDate,
+    tickers: payload.tickers,
+    weights: weights.map(w => Number(w.toFixed(8))),
+    period: payload.period,
+    benchmark: payload.benchmark
+  });
+
+  const renderRiskCards = (m) => {
     const cards = [
       ['샤프', m.sharpeRatio, '위험 대비 초과수익'],
       ['소르티노', m.sortinoRatio, '하방위험 반영'],
@@ -2241,7 +2260,33 @@ async function loadRiskMetrics() {
         <div class="desc">${desc}</div>
       </div>
     `).join('');
-    status.textContent = `완료 · 종목 ${holdings.length}개`;
+  };
+
+  const cachedRaw = localStorage.getItem('folio_risk_cache');
+  if (!riskMetricsCache && cachedRaw) {
+    try { riskMetricsCache = JSON.parse(cachedRaw); } catch(e) {}
+  }
+  if (riskMetricsCache && riskMetricsCache.fingerprint === fingerprint && riskMetricsCache.metrics) {
+    renderRiskCards(riskMetricsCache.metrics);
+    status.textContent = `전일 기준 캐시 · ${baseDate}`;
+    return;
+  }
+
+  grid.innerHTML = '<div class="empty-state" style="grid-column:1/-1">지표 계산 중...</div>';
+  status.textContent = `${payload.period} / ${payload.benchmark} · ${baseDate}`;
+  try {
+    const r = await fetch(`${BACKEND_URL}/api/portfolio/metrics`, {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(payload)
+    });
+    const j = await r.json();
+    if (!r.ok || !j.ok || !j.metrics) throw new Error(j.error || '지표 계산 실패');
+    const m = j.metrics;
+    renderRiskCards(m);
+    riskMetricsCache = { fingerprint, metrics: m };
+    localStorage.setItem('folio_risk_cache', JSON.stringify(riskMetricsCache));
+    status.textContent = `완료(전일 기준) · 종목 ${holdings.length}개`;
   } catch(e) {
     grid.innerHTML = `<div class="empty-state" style="grid-column:1/-1">지표 계산 실패: ${e.message}</div>`;
     status.textContent = '실패';
@@ -2343,8 +2388,11 @@ refreshAll = async function() {
 // ══════════════════════════════════════════
 document.getElementById('dashDate').textContent=new Date().toLocaleDateString('ko-KR',{year:'numeric',month:'long',day:'numeric',weekday:'long'});
 (async () => {
-  await loadSyncedState();
+  // F5 체감 속도를 위해 로컬 상태를 먼저 즉시 렌더링
   renderAll();
+  // 서버 동기화 상태는 백그라운드에서 가져오고, 도착하면 한 번 더 렌더링
+  const synced = await loadSyncedState();
+  if (synced) renderAll();
   refreshAll();
   startAutoRefresh();
 })();
