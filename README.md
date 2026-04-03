@@ -96,3 +96,73 @@ create table if not exists public.holding_daily_snapshots (
 - 기간별 수익률은 `/api/portfolio/period-returns`에서 Supabase의 포트폴리오 일별 기준가(`total_market_krw`)를 기반으로 계산
 - 프론트엔드는 백엔드 DB 결과를 우선 사용하고, 백엔드 장애 시에만 로컬 백업 상태를 제한적으로 사용
 - 일별 스냅샷 데이터는 Supabase에 누적 저장되며, 필요 시 별도 화면/리포트에서 조회 가능
+
+## 4) yfinance 전일 종가 → Supabase 적재 자동화
+
+`supabase-py` + `yfinance`를 사용하는 배치 스크립트가 추가되었습니다.
+
+- 파일: `scripts/update_prev_close.py`
+- 기본 소스: `holdings`, `watchlist` 테이블의 `ticker`
+- 타겟 테이블: `market_prev_close` (환경 변수로 변경 가능)
+
+### 4-1. 타겟 테이블 생성
+
+```sql
+create table if not exists public.market_prev_close (
+  ticker text not null,
+  market_date date not null,
+  prev_close numeric not null default 0,
+  close_price numeric not null default 0,
+  change numeric not null default 0,
+  change_pct numeric not null default 0,
+  exchange_group text not null default 'US',
+  updated_at timestamptz not null default now(),
+  primary key (ticker, market_date)
+);
+```
+
+### 4-2. 의존성 설치
+
+```bash
+pip install yfinance supabase
+```
+
+### 4-3. 1회 실행
+
+```bash
+export SUPABASE_URL="https://<project-ref>.supabase.co"
+export SUPABASE_SERVICE_ROLE_KEY="<service-role-key>"
+python scripts/update_prev_close.py --mode once
+```
+
+### 4-4. 거래소 마감시간 자동 실행
+
+스크립트 자체 daemon 모드(거래소 현지 마감시간 + 기본 15분)를 지원합니다.
+
+```bash
+python scripts/update_prev_close.py --mode daemon --delay-minutes 15
+```
+
+기본 매핑:
+- US: 16:00 (America/New_York)
+- KR: 15:30 (Asia/Seoul)
+- JP: 15:00 (Asia/Tokyo)
+- HK: 16:00 (Asia/Hong_Kong)
+- UK: 16:30 (Europe/London)
+- EU: 17:30 (Europe/Paris)
+
+### 4-5. cron으로 단순 운영 (대안)
+
+daemon 대신 운영 서버 시간 기준 cron으로 고정 실행도 가능합니다.
+
+```cron
+# 예시: 평일 UTC 21:20(미국장 마감 직후 근사치)
+20 21 * * 1-5 cd /workspace/Equity_PMS && /usr/bin/python3 scripts/update_prev_close.py --mode once >> /tmp/prev_close.log 2>&1
+```
+
+### 4-6. 추가 환경 변수
+
+- `PREV_CLOSE_SOURCE_TABLES`: 조회 대상 테이블(기본 `holdings,watchlist`)
+- `PREV_CLOSE_EXTRA_TICKERS`: 강제 포함 ticker CSV
+- `PREV_CLOSE_TARGET_TABLE`: 저장 테이블(기본 `market_prev_close`)
+- `PREV_CLOSE_DELAY_MINUTES`: daemon 실행 지연(기본 `15`)
