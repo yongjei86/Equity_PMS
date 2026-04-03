@@ -45,6 +45,7 @@ INDEX_SYMBOL_MAP = {
 }
 
 KOREA_EXCHANGE_ALIASES = {'KRX', 'KOSPI', 'KO', 'KS', 'KOSDAQ', 'KQ'}
+YAHOO_CHART_HOSTS = ('query1.finance.yahoo.com', 'query2.finance.yahoo.com')
 
 
 def _normalize_ticker(ticker):
@@ -185,6 +186,80 @@ def _period_to_start_date(period):
     return now - timedelta(days=380)
 
 
+def _fetch_yahoo_chart_json(ticker, range_param='3mo', interval='1d'):
+    ticker = _normalize_ticker(ticker)
+    params = {'interval': interval, 'range': range_param}
+    for host in YAHOO_CHART_HOSTS:
+        try:
+            r = requests.get(
+                f'https://{host}/v8/finance/chart/{ticker}',
+                params=params,
+                timeout=8
+            )
+            r.raise_for_status()
+            data = r.json()
+            chart = data.get('chart', {}) if isinstance(data, dict) else {}
+            if chart.get('error') is None and isinstance(chart.get('result'), list) and chart.get('result'):
+                return data
+        except Exception:
+            continue
+    return None
+
+
+def _parse_yahoo_close_series(data, ticker):
+    try:
+        result = data.get('chart', {}).get('result', [])[0]
+        ts = result.get('timestamp') or []
+        quote = (result.get('indicators') or {}).get('quote', [{}])[0]
+        closes = quote.get('close') or []
+        rows = []
+        for t, c in zip(ts, closes):
+            if c is None:
+                continue
+            rows.append((pd.to_datetime(int(t), unit='s', utc=True).tz_localize(None), float(c)))
+        if not rows:
+            return None
+        rows.sort(key=lambda x: x[0])
+        s = pd.Series([v for _, v in rows], index=[d for d, _ in rows], name=ticker, dtype='float64')
+        s = s.dropna()
+        if s.empty:
+            return None
+        return _latest_market_close(s)
+    except Exception:
+        return None
+
+
+def _yahoo_price_data(ticker):
+    ticker = _normalize_ticker(ticker)
+    data = _fetch_yahoo_chart_json(ticker, range_param='5d', interval='1d')
+    if not data:
+        return None
+    try:
+        result = data.get('chart', {}).get('result', [])[0]
+        meta = result.get('meta', {}) or {}
+        price = _to_float(meta.get('regularMarketPrice'))
+        prev = _to_float(meta.get('chartPreviousClose') or meta.get('previousClose'))
+        if price <= 0:
+            close = _parse_yahoo_close_series(data, ticker)
+            if close is None or close.empty:
+                return None
+            price = float(close.iloc[-1])
+            prev = float(close.iloc[-2]) if len(close) >= 2 else price
+        change = price - prev
+        change_pct = (change / prev * 100) if prev else 0
+        currency = (meta.get('currency') or _infer_currency(ticker) or 'USD').upper()
+        return {
+            'price': round(price, 6),
+            'change': round(change, 6),
+            'changePct': round(change_pct, 4),
+            'name': meta.get('longName') or meta.get('shortName') or ticker,
+            'currency': currency,
+            'ok': True,
+        }
+    except Exception:
+        return None
+
+
 def _yf_to_fdr_symbol(ticker):
     ticker = _normalize_ticker(ticker)
     if ticker.startswith('^'):
@@ -225,6 +300,17 @@ def _infer_currency(ticker):
 
 def _fetch_close_series_fdr(ticker, period='1y'):
     ticker = _normalize_ticker(ticker)
+    # 1순위: Yahoo Finance chart (한국/해외 공통, 안정적)
+    yahoo_data = _fetch_yahoo_chart_json(ticker, range_param=period, interval='1d')
+    yahoo_series = _parse_yahoo_close_series(yahoo_data, ticker) if yahoo_data else None
+    if yahoo_series is not None and not yahoo_series.empty:
+        start = _period_to_start_date(period)
+        yahoo_series = yahoo_series[yahoo_series.index.date >= start]
+        if yahoo_series is not None and not yahoo_series.empty:
+            yahoo_series.name = ticker
+            return yahoo_series
+
+    # 2순위: Alpha Vantage daily
     alpha_symbol = _ticker_to_alpha_symbol(ticker)
     if not alpha_symbol:
         return None
@@ -273,12 +359,17 @@ def _fdr_price_data(ticker):
 
 def get_price_data(ticker):
     ticker = _normalize_ticker(ticker)
-    # 1순위: Alpha Vantage Daily 기반 전일 종가
+    # 1순위: Yahoo Finance chart API
+    yahoo_result = _yahoo_price_data(ticker)
+    if yahoo_result is not None:
+        return yahoo_result
+
+    # 2순위: Alpha Vantage Daily 기반 전일 종가
     fdr_result = _fdr_price_data(ticker)
     if fdr_result is not None:
         return fdr_result
 
-    # 2순위: Global Quote (응답 축소 시)
+    # 3순위: Global Quote (응답 축소 시)
     try:
         alpha_symbol = _ticker_to_alpha_symbol(ticker)
         data = _alpha_vantage_query({'function': 'GLOBAL_QUOTE', 'symbol': alpha_symbol})
@@ -569,6 +660,21 @@ def search_ticker():
     query = (request.args.get('q') or '').strip()
     if not query:
         return jsonify({'items': []})
+    q_upper = query.upper()
+    q_digits = ''.join(ch for ch in q_upper if ch.isdigit())
+
+    # 0순위: 한국 6자리 코드 직접 입력 시 즉시 반환
+    if q_digits and len(q_digits) == 6:
+        quick_items = []
+        for suffix, market in (('.KS', 'KOSPI'), ('.KQ', 'KOSDAQ')):
+            quick_items.append({
+                'symbol': f'{q_digits}{suffix}',
+                'name': q_digits,
+                'exchange': market,
+                'currency': 'KRW',
+                'type': 'EQUITY',
+            })
+        return jsonify({'items': quick_items})
 
     # 1순위: Alpha Vantage SYMBOL_SEARCH
     data = _alpha_vantage_query({'function': 'SYMBOL_SEARCH', 'keywords': query})
@@ -597,7 +703,7 @@ def search_ticker():
 
     # 2순위: 한국 주식 코드/한글 검색 (FDR KRX 상장종목)
     # 예) 005930, 삼성, 카카오
-    is_korean_hint = any('\uac00' <= ch <= '\ud7a3' for ch in query) or query.isdigit()
+    is_korean_hint = any('\uac00' <= ch <= '\ud7a3' for ch in query) or q_digits != ''
     if is_korean_hint:
         try:
             krx = fdr.StockListing('KRX')
