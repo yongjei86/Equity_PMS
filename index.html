@@ -725,6 +725,10 @@ tr:hover td{background:rgba(255,255,255,0.02)}
         <input class="form-input" id="fQty" type="number" placeholder="0"/>
       </div>
     </div>
+    <div class="form-group">
+      <label class="form-label">매수 날짜</label>
+      <input class="form-input" id="fBuyDate" type="date"/>
+    </div>
     <div class="form-row">
       <div class="form-group">
         <label class="form-label">통화</label>
@@ -967,12 +971,12 @@ async function fetchPrice(ticker) {
   try {
     const ctrl = new AbortController();
     const t = setTimeout(() => ctrl.abort(), 5000);
-    const r = await fetch(`${BACKEND_URL}/api/market/prev-close?key=${encodeURIComponent(PORTFOLIO_SYNC_KEY)}&tickers=${encodeURIComponent(ticker)}`, { signal: ctrl.signal });
+    const r = await fetch(`${BACKEND_URL}/api/market/prices?key=${encodeURIComponent(PORTFOLIO_SYNC_KEY)}&tickers=${encodeURIComponent(ticker)}`, { signal: ctrl.signal });
     clearTimeout(t);
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const j = await r.json();
     const price = j?.prices?.[ticker] || j?.prices?.[(ticker || '').toUpperCase()];
-    if (price && price.ok) return { ...price, name:ticker, currency:'USD' };
+    if (price && price.ok) return { ...price, name:price.name || ticker, currency:price.currency || 'USD' };
   } catch(e) {
     console.warn(`fetchPrice failed for ${ticker}:`, e);
   }
@@ -1007,12 +1011,12 @@ async function refreshAll(options = {}) {
   const tickers = [...new Set([...holdings.map(h=>h.ticker),...watchlist])];
   fetchFX();
   let pm = {};
-  // DB(market_prev_close) 기반 전일 종가 조회
+  // 하이브리드: 외부 API 실시간 우선 + Supabase 전일 종가 폴백
   if (BACKEND_URL && tickers.length) {
     try {
       const ctrl = new AbortController();
       const t = setTimeout(() => ctrl.abort(), 15000);
-      const r = await fetch(`${BACKEND_URL}/api/market/prev-close?key=${encodeURIComponent(PORTFOLIO_SYNC_KEY)}&tickers=${encodeURIComponent(tickers.join(','))}`, { signal: ctrl.signal });
+      const r = await fetch(`${BACKEND_URL}/api/market/prices?key=${encodeURIComponent(PORTFOLIO_SYNC_KEY)}&tickers=${encodeURIComponent(tickers.join(','))}`, { signal: ctrl.signal });
       clearTimeout(t);
       if (r.ok) {
         const j = await r.json();
@@ -2131,6 +2135,7 @@ function _runTickerFetch(){
 function openModal(id=null){
   editId=id;
   document.getElementById('modalTitle').textContent=id?'종목 수정':'종목 추가';
+  const buyDateInput = document.getElementById('fBuyDate');
   if(id){
     const h=holdings.find(x=>x.id===id);
     _fullTicker=h.ticker;
@@ -2138,6 +2143,10 @@ function openModal(id=null){
     document.getElementById('fName').value=h.name||'';
     document.getElementById('fPrice').value=h.avgPrice;
     document.getElementById('fQty').value=h.qty;
+    const tradeList = Array.isArray(trades[id]) ? trades[id] : [];
+    const buyDates = tradeList.filter(t => t.type === 'buy' && t.date).map(t => t.date).sort();
+    buyDateInput.value=buyDates.length ? buyDates[0] : '';
+    buyDateInput.disabled=true;
     document.getElementById('fCurrency').value=h.currency||'USD';
     document.getElementById('fSector').value=h.sector;
     document.getElementById('fetchHint').textContent='현재가: '+(h.current?fmtLocal(h.current,h.currency):'미조회');
@@ -2145,6 +2154,8 @@ function openModal(id=null){
   } else {
     _fullTicker=null;
     ['fTicker','fName','fPrice','fQty'].forEach(i=>document.getElementById(i).value='');
+    buyDateInput.value=new Date().toISOString().slice(0,10);
+    buyDateInput.disabled=false;
     document.getElementById('fCurrency').value='USD';
     document.getElementById('fSector').value='기술';
     document.getElementById('fetchHint').textContent='입력 후 가격 자동 조회됩니다';
@@ -2181,6 +2192,7 @@ async function saveHolding(){
   const name=document.getElementById('fName').value.trim()||ticker;
   const avgPrice=parseFloat(document.getElementById('fPrice').value);
   const qty=parseFloat(document.getElementById('fQty').value);
+  const buyDate=document.getElementById('fBuyDate').value;
   const currency=document.getElementById('fCurrency').value;
   const sector=document.getElementById('fSector').value;
   if(!ticker||isNaN(avgPrice)||isNaN(qty)){alert('필수 항목을 모두 입력해주세요.');return;}
@@ -2188,8 +2200,18 @@ async function saveHolding(){
     const idx=holdings.findIndex(h=>h.id===editId);
     holdings[idx]={...holdings[idx],ticker,name,avgPrice,qty,currency,sector};
   }else{
+    if(!buyDate){alert('매수 날짜를 입력해주세요.');return;}
     const h={id:Date.now(),ticker,name,avgPrice,qty,currency,current:0,change:0,changePct:0,sector};
     holdings.push(h);
+    if (!Array.isArray(trades[h.id])) trades[h.id] = [];
+    trades[h.id].unshift({
+      id: Date.now() + 1,
+      date: buyDate,
+      type: 'buy',
+      price: avgPrice,
+      qty,
+      memo: '초기 보유 등록'
+    });
     const r=await fetchPrice(ticker);
     if(r.ok){h.current=r.price;h.change=r.change;h.changePct=r.changePct;if(r.name)h.name=r.name;}
   }

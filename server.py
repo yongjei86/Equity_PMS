@@ -52,6 +52,8 @@ KOREA_EXCHANGE_ALIASES = {'KRX', 'KOSPI', 'KO', 'KS', 'KOSDAQ', 'KQ'}
 YAHOO_CHART_HOSTS = ('query1.finance.yahoo.com', 'query2.finance.yahoo.com')
 PREV_CLOSE_CACHE_TTL_SECONDS = 20
 _PREV_CLOSE_CACHE = {}
+LIVE_PRICE_CACHE_TTL_SECONDS = 5
+_LIVE_PRICE_CACHE = {}
 
 
 def _normalize_ticker(ticker):
@@ -406,6 +408,71 @@ def _to_float(value, default=0.0):
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _fetch_prev_close_prices(tickers):
+    normalized = sorted({(t or '').strip().upper() for t in tickers if str(t or '').strip()})
+    if not normalized:
+        return {}
+    in_clause = '(' + ','.join([f'"{t}"' for t in normalized]) + ')'
+    rows, err = _supabase_request(
+        'GET',
+        'market_prev_close',
+        params={
+            'ticker': f'in.{in_clause}',
+            'select': 'ticker,market_date,close_price,prev_close,change,change_pct',
+            'order': 'ticker.asc,market_date.desc',
+            'limit': len(normalized) * 10,
+        }
+    )
+    if err:
+        return {}
+
+    by_ticker = {}
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        ticker = (row.get('ticker') or '').upper()
+        if not ticker or ticker in by_ticker:
+            continue
+        close_price = _to_float(row.get('close_price'), 0)
+        prev_close = _to_float(row.get('prev_close'), 0)
+        change = _to_float(row.get('change'), close_price - prev_close)
+        change_pct = _to_float(row.get('change_pct'), (change / prev_close * 100) if prev_close else 0)
+        by_ticker[ticker] = {
+            'price': close_price,
+            'change': change,
+            'changePct': change_pct,
+            'ok': close_price > 0,
+            'marketDate': row.get('market_date'),
+            'source': 'supabase',
+        }
+    return by_ticker
+
+
+def _fetch_live_prices(tickers):
+    normalized = sorted({(t or '').strip().upper() for t in tickers if str(t or '').strip()})
+    if not normalized:
+        return {}
+
+    def fetch_one(ticker):
+        data = get_price_data(ticker)
+        if data is None:
+            return ticker, {
+                'ok': False,
+                'price': 0,
+                'change': 0,
+                'changePct': 0,
+                'name': ticker,
+                'currency': _infer_currency(ticker),
+                'source': 'live',
+            }
+        result = dict(data)
+        result['source'] = 'live'
+        return ticker, result
+
+    with ThreadPoolExecutor(max_workers=min(len(normalized), 8)) as ex:
+        return dict(ex.map(fetch_one, normalized))
 
 
 def _supabase_enabled():
@@ -1048,40 +1115,60 @@ def get_market_prev_close():
     if cached and (now_ts - cached.get('ts', 0) <= PREV_CLOSE_CACHE_TTL_SECONDS):
         return jsonify({'ok': True, 'prices': cached.get('prices', {}), 'cached': True}), 200
 
-    in_clause = '(' + ','.join([f'"{t}"' for t in tickers]) + ')'
-    rows, err = _supabase_request(
-        'GET',
-        'market_prev_close',
-        params={
-            'ticker': f'in.{in_clause}',
-            'select': 'ticker,market_date,close_price,prev_close,change,change_pct',
-            'order': 'ticker.asc,market_date.desc',
-            'limit': len(tickers) * 10,
-        }
-    )
-    if err:
-        return jsonify({'ok': False, 'error': err, 'prices': {}}), 500
-
-    by_ticker = {}
-    for row in rows if isinstance(rows, list) else []:
-        if not isinstance(row, dict):
-            continue
-        ticker = (row.get('ticker') or '').upper()
-        if not ticker or ticker in by_ticker:
-            continue
-        close_price = _to_float(row.get('close_price'), 0)
-        prev_close = _to_float(row.get('prev_close'), 0)
-        change = _to_float(row.get('change'), close_price - prev_close)
-        change_pct = _to_float(row.get('change_pct'), (change / prev_close * 100) if prev_close else 0)
-        by_ticker[ticker] = {
-            'price': close_price,
-            'change': change,
-            'changePct': change_pct,
-            'ok': close_price > 0,
-            'marketDate': row.get('market_date'),
-        }
+    by_ticker = _fetch_prev_close_prices(tickers)
     _PREV_CLOSE_CACHE[cache_key] = {'ts': now_ts, 'prices': by_ticker}
     return jsonify({'ok': True, 'prices': by_ticker, 'cached': False}), 200
+
+
+@app.route('/api/market/prices', methods=['GET'])
+def get_market_prices():
+    key = (request.args.get('key') or 'default').strip() or 'default'
+    tickers_param = (request.args.get('tickers') or '').strip()
+    tickers = [t.strip().upper() for t in tickers_param.split(',') if t.strip()]
+    if not tickers:
+        state, err = _supabase_load_portfolio_state(key)
+        if err:
+            return jsonify({'ok': False, 'error': err, 'prices': {}}), 500
+        tickers = sorted({
+            (h.get('ticker') or '').upper()
+            for h in state.get('holdings', [])
+            if isinstance(h, dict) and (h.get('ticker') or '').strip()
+        })
+    if not tickers:
+        return jsonify({'ok': True, 'prices': {}}), 200
+
+    cache_key = f'{key}|' + ','.join(sorted(set(tickers)))
+    now_ts = time.time()
+    cached = _LIVE_PRICE_CACHE.get(cache_key)
+    if cached and (now_ts - cached.get('ts', 0) <= LIVE_PRICE_CACHE_TTL_SECONDS):
+        return jsonify({'ok': True, 'prices': cached.get('prices', {}), 'cached': True}), 200
+
+    live_prices = _fetch_live_prices(tickers)
+    missing = [t for t in tickers if not live_prices.get(t, {}).get('ok')]
+    fallback = _fetch_prev_close_prices(missing) if missing else {}
+
+    merged = {}
+    for ticker in tickers:
+        live = live_prices.get(ticker)
+        if live and live.get('ok'):
+            merged[ticker] = live
+            continue
+        fallback_row = fallback.get(ticker)
+        if fallback_row:
+            merged[ticker] = fallback_row
+        else:
+            merged[ticker] = live or {
+                'ok': False,
+                'price': 0,
+                'change': 0,
+                'changePct': 0,
+                'name': ticker,
+                'currency': _infer_currency(ticker),
+                'source': 'none',
+            }
+
+    _LIVE_PRICE_CACHE[cache_key] = {'ts': now_ts, 'prices': merged}
+    return jsonify({'ok': True, 'prices': merged, 'cached': False}), 200
 
 
 @app.route('/api/portfolio/state', methods=['POST'])

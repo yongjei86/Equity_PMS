@@ -97,13 +97,14 @@ create table if not exists public.portfolio_settings (
 
 - 프론트엔드의 보유종목/거래내역/관심종목 수정사항은 `/api/portfolio/state`를 통해 Supabase `holdings`, `trades`, `watchlist`에 저장
 - 새로고침 시 `/api/portfolio/state`에서 같은 `portfolio_key`의 데이터를 다시 읽어서 렌더링하므로, 어떤 브라우저에서 접속해도 동일한 데이터 표시
-- 프론트엔드는 `/api/market/prev-close`로 DB(`market_prev_close`)에 적재된 전일 종가만 읽어서 화면에 표시
+- 프론트엔드는 `/api/market/prices`로 외부 시세 API(Yahoo/Alpha Vantage)에서 현재가를 우선 조회하고, 실패 시 Supabase `market_prev_close`를 폴백으로 사용
 - 프론트엔드가 가격 새로고침(`refreshAll`) 완료 후 `/api/portfolio/daily/snapshot` 호출
 - 백엔드가 현재 보유 종목 상태로 KRW 기준 평가액/손익 계산
 - Supabase `upsert`로 날짜 단위 누적 저장
 - 기간별 수익률은 `/api/portfolio/period-returns`에서 Supabase의 포트폴리오 일별 기준가(`total_market_krw`)를 기반으로 계산
 - 프론트엔드/백엔드 설정(appSettings, 벤치마크 등)도 `portfolio_settings`에 저장
 - 일별 스냅샷 데이터는 Supabase에 누적 저장되며, 필요 시 별도 화면/리포트에서 조회 가능
+- 즉, **시장 기초 데이터는 외부 API**, **사용자 개인 데이터(매수가/수량/매수일 등)는 Supabase**에 저장하는 하이브리드 방식을 사용
 
 ## 5) 기본 Supabase 연결 정보
 
