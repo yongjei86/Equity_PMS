@@ -13,8 +13,35 @@ CORS(app)
 STATE_FILE = os.path.join(os.path.dirname(__file__), 'portfolio_state.json')
 STATE_LOCK = Lock()
 
+FINNHUB_API_KEY = os.environ.get('FINNHUB_API_KEY', '')
+FINNHUB_BASE = 'https://finnhub.io/api/v1'
 
-def get_price_data(ticker):
+# 거래소 코드 → 통화 매핑
+EXCHANGE_CURRENCY = {
+    'KS': 'KRW', 'KQ': 'KRW',
+    'HK': 'HKD',
+    'T': 'JPY',
+    'L': 'GBP',
+    'PA': 'EUR', 'DE': 'EUR', 'MI': 'EUR',
+    'SS': 'CNY', 'SZ': 'CNY',
+}
+
+def yf_to_finnhub(ticker):
+    """Yahoo Finance 형식 → Finnhub 형식: 005930.KS → KS:005930"""
+    if '.' in ticker and not ticker.startswith('^') and '=X' not in ticker:
+        base, exchange = ticker.rsplit('.', 1)
+        return f"{exchange}:{base}"
+    return ticker
+
+def finnhub_to_yf(symbol):
+    """Finnhub 형식 → Yahoo Finance 형식: KS:005930 → 005930.KS"""
+    if ':' in symbol:
+        exchange, base = symbol.split(':', 1)
+        return f"{base}.{exchange}"
+    return symbol
+
+def _yf_price_fallback(ticker):
+    """yfinance fast_info로 가격 조회 (Finnhub 실패 시 폴백)"""
     try:
         t = yf.Ticker(ticker)
         info = t.fast_info
@@ -24,7 +51,6 @@ def get_price_data(ticker):
             return None
         change = price - prev
         change_pct = (change / prev) * 100 if prev else 0
-        # fast_info.currency is available without the slow t.info call
         currency = (getattr(info, 'currency', None) or 'USD').upper()
         return {
             'price': round(price, 6),
@@ -36,6 +62,41 @@ def get_price_data(ticker):
         }
     except Exception:
         return None
+
+def get_price_data(ticker):
+    # FX(=X), 지수(^)는 yfinance가 더 정확 — Finnhub 패스
+    use_finnhub = FINNHUB_API_KEY and '=X' not in ticker and not ticker.startswith('^')
+
+    if use_finnhub:
+        try:
+            fh_symbol = yf_to_finnhub(ticker)
+            r = requests.get(
+                f'{FINNHUB_BASE}/quote',
+                params={'symbol': fh_symbol, 'token': FINNHUB_API_KEY},
+                timeout=5
+            )
+            if r.ok:
+                d = r.json()
+                price = d.get('c', 0)
+                prev  = d.get('pc', 0)
+                if price and price > 0:
+                    change = price - prev
+                    change_pct = (change / prev * 100) if prev else 0
+                    # 통화는 거래소 코드로 추론
+                    exchange = fh_symbol.split(':')[0] if ':' in fh_symbol else 'US'
+                    currency = EXCHANGE_CURRENCY.get(exchange, 'USD')
+                    return {
+                        'price': round(price, 6),
+                        'change': round(change, 6),
+                        'changePct': round(change_pct, 4),
+                        'name': ticker,
+                        'currency': currency,
+                        'ok': True,
+                    }
+        except Exception:
+            pass
+
+    return _yf_price_fallback(ticker)
 
 
 def _to_float(value, default=0.0):
@@ -308,21 +369,50 @@ def search_ticker():
     query = (request.args.get('q') or '').strip()
     if not query:
         return jsonify({'items': []})
-    url = 'https://query2.finance.yahoo.com/v1/finance/search'
-    params = {
-        'q': query,
-        'quotesCount': 12,
-        'newsCount': 0,
-        'enableFuzzyQuery': 'true',
-        'enableEnhancedTrivialQuery': 'true',
-        'lang': 'en-US',
-        'region': 'US',
-    }
+
+    # 1순위: Finnhub 검색
+    if FINNHUB_API_KEY:
+        try:
+            r = requests.get(
+                f'{FINNHUB_BASE}/search',
+                params={'q': query, 'token': FINNHUB_API_KEY},
+                timeout=5
+            )
+            r.raise_for_status()
+            results = r.json().get('result', []) or []
+            items = []
+            for item in results:
+                fh_symbol = (item.get('symbol') or '').strip()
+                if not fh_symbol:
+                    continue
+                item_type = (item.get('type') or '').upper()
+                if item_type and item_type not in {'COMMON STOCK', 'ETP', 'ADR', 'GDR', ''}:
+                    continue
+                yf_symbol = finnhub_to_yf(fh_symbol)
+                exchange = fh_symbol.split(':')[0] if ':' in fh_symbol else 'US'
+                currency = EXCHANGE_CURRENCY.get(exchange, 'USD')
+                items.append({
+                    'symbol': yf_symbol,
+                    'name': item.get('description', fh_symbol),
+                    'exchange': item.get('displaySymbol', fh_symbol),
+                    'currency': currency,
+                    'type': item_type,
+                })
+            if items:
+                return jsonify({'items': items[:10]})
+        except Exception:
+            pass
+
+    # 2순위: Yahoo Finance 검색 (폴백)
     try:
-        resp = requests.get(url, params=params, timeout=6)
+        resp = requests.get(
+            'https://query2.finance.yahoo.com/v1/finance/search',
+            params={'q': query, 'quotesCount': 12, 'newsCount': 0,
+                    'enableFuzzyQuery': 'true', 'lang': 'en-US'},
+            timeout=6
+        )
         resp.raise_for_status()
-        payload = resp.json()
-        quotes = payload.get('quotes', []) or []
+        quotes = resp.json().get('quotes', []) or []
         items = []
         for q in quotes:
             symbol = (q.get('symbol') or '').strip().upper()

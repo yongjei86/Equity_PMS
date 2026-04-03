@@ -583,6 +583,11 @@ tr:hover td{background:rgba(255,255,255,0.02)}
   <div class="modal">
     <h2>설정</h2>
     <div class="form-group">
+      <label class="form-label">Finnhub API Key (실시간 주가)</label>
+      <input class="form-input" id="sFinnhubKey" type="password" placeholder="your_finnhub_api_key"/>
+      <div style="font-size:11px;color:var(--muted);margin-top:4px">실시간 주가 조회에 사용됩니다. <a href="https://finnhub.io" target="_blank" style="color:var(--accent2)">finnhub.io</a>에서 무료 발급 (서버에는 환경변수 FINNHUB_API_KEY로 설정)</div>
+    </div>
+    <div class="form-group">
       <label class="form-label">Claude API Key (뉴스 AI 분석용)</label>
       <input class="form-input" id="sApiKey" type="password" placeholder="sk-ant-api03-..."/>
       <div style="font-size:11px;color:var(--muted);margin-top:4px">뉴스 번역 및 AI 요약에 사용됩니다. <a href="https://console.anthropic.com" target="_blank" style="color:var(--accent2)">console.anthropic.com</a>에서 발급</div>
@@ -932,8 +937,19 @@ function parseYahooResponse(j, ticker) {
   return { price, change, changePct, name:m.longName||m.shortName||ticker, currency:(m.currency||'USD').toUpperCase(), ok:true };
 }
 
+// Yahoo Finance 형식 → Finnhub 형식: 005930.KS → KS:005930
+function toFinnhubTicker(ticker) {
+  if (ticker.includes('.') && !ticker.startsWith('^') && !ticker.includes('=X')) {
+    const parts = ticker.split('.');
+    const exchange = parts[parts.length - 1];
+    const base = parts.slice(0, -1).join('.');
+    return `${exchange}:${base}`;
+  }
+  return ticker;
+}
+
 async function fetchPrice(ticker) {
-  // 1순위: 로컬 백엔드 서버 (server.py) — 5s 타임아웃
+  // 1순위: 로컬 백엔드 서버 (server.py, Finnhub 사용) — 5s 타임아웃
   if (BACKEND_URL) {
     try {
       const ctrl = new AbortController();
@@ -947,7 +963,30 @@ async function fetchPrice(ticker) {
     } catch(e) { /* 서버 미실행 또는 타임아웃 시 다음으로 */ }
   }
 
-  // 2순위: Yahoo Finance 직접 접근 (query1, query2)
+  // 2순위: Finnhub 직접 호출 (설정에 API 키 있는 경우)
+  const finnhubKey = appSettings.finnhubApiKey;
+  if (finnhubKey && !ticker.includes('=X') && !ticker.startsWith('^')) {
+    try {
+      const fhTicker = toFinnhubTicker(ticker);
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), 5000);
+      const r = await fetch(
+        `https://finnhub.io/api/v1/quote?symbol=${encodeURIComponent(fhTicker)}&token=${finnhubKey}`,
+        { signal: ctrl.signal }
+      );
+      clearTimeout(t);
+      if (r.ok) {
+        const d = await r.json();
+        if (d.c > 0) {
+          const change = d.c - d.pc;
+          const changePct = d.pc ? (change / d.pc) * 100 : 0;
+          return { price: d.c, change, changePct, name: ticker, currency: 'USD', ok: true };
+        }
+      }
+    } catch(e) { /* try next */ }
+  }
+
+  // 3순위: Yahoo Finance 직접 접근 (CORS 허용 시)
   const encoded = encodeURIComponent(ticker);
   const params = 'interval=1d&range=2d';
   for (const host of ['query1', 'query2']) {
@@ -959,7 +998,7 @@ async function fetchPrice(ticker) {
     } catch(e) { /* try next */ }
   }
 
-  // 3순위: CORS 프록시
+  // 4순위: CORS 프록시
   try {
     const proxyUrl = `https://corsproxy.io/?url=${encodeURIComponent(`https://query1.finance.yahoo.com/v8/finance/chart/${encoded}?${params}`)}`;
     const r = await fetch(proxyUrl);
@@ -2213,6 +2252,7 @@ async function loadRiskMetrics() {
 //  SETTINGS & BENCHMARK
 // ══════════════════════════════════════════
 function openSettings() {
+  document.getElementById('sFinnhubKey').value = appSettings.finnhubApiKey || '';
   document.getElementById('sApiKey').value = appSettings.claudeApiKey || '';
   document.getElementById('sNewsApiKey').value = appSettings.newsApiKey || '';
   renderBenchmarkList();
@@ -2222,6 +2262,7 @@ function closeSettings() { document.getElementById('settingsBackdrop').classList
 function closeSettingsOutside(e) { if(e.target===document.getElementById('settingsBackdrop')) closeSettings(); }
 
 function saveSettings() {
+  appSettings.finnhubApiKey = document.getElementById('sFinnhubKey').value.trim();
   appSettings.claudeApiKey = document.getElementById('sApiKey').value.trim();
   appSettings.newsApiKey = document.getElementById('sNewsApiKey').value.trim();
   saveAllState();
