@@ -233,6 +233,7 @@ tr:hover td{background:rgba(255,255,255,0.02)}
 .ticker-suggest-item{padding:10px 12px;border-bottom:1px solid var(--border);cursor:pointer;display:flex;align-items:center;justify-content:space-between;gap:8px}
 .ticker-suggest-item:last-child{border-bottom:none}
 .ticker-suggest-item:hover{background:rgba(255,255,255,0.04)}
+.ticker-suggest-item.active{background:rgba(255,255,255,0.07)}
 .ticker-code{font-family:var(--font-mono);font-size:12px;font-weight:600}
 .ticker-meta{font-size:11px;color:var(--muted)}
 
@@ -395,41 +396,6 @@ tr:hover td{background:rgba(255,255,255,0.02)}
       </div>
       <div class="table-wrap">
         <table class="returns-table" id="returnsTable"></table>
-      </div>
-    </div>
-
-    <div class="card" style="margin-bottom:16px">
-      <div class="card-header">
-        <span class="card-title">Supabase 일별 누적 스냅샷</span>
-        <span class="card-sub" id="dailySnapshotStatus">최근 30일</span>
-      </div>
-      <div class="table-wrap" style="margin-bottom:12px">
-        <table class="returns-table">
-          <thead>
-            <tr>
-              <th>일자</th><th>총 평가액</th><th>누적 손익</th><th>누적 수익률</th>
-            </tr>
-          </thead>
-          <tbody id="dailyPortfolioBody">
-            <tr><td colspan="4" class="returns-loading">스냅샷 로딩 중...</td></tr>
-          </tbody>
-        </table>
-      </div>
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
-        <span class="card-sub">개별 보유 종목 일별 추이</span>
-        <select class="form-input" id="dailyTickerSelect" style="max-width:220px;height:32px" onchange="loadDailyHoldingHistory()"></select>
-      </div>
-      <div class="table-wrap">
-        <table class="returns-table">
-          <thead>
-            <tr>
-              <th>일자</th><th>기준가</th><th>평가손익(억원)</th><th>수익률</th>
-            </tr>
-          </thead>
-          <tbody id="dailyHoldingBody">
-            <tr><td colspan="4" class="returns-loading">종목을 선택하세요.</td></tr>
-          </tbody>
-        </table>
       </div>
     </div>
 
@@ -804,19 +770,18 @@ tr:hover td{background:rgba(255,255,255,0.02)}
 // ══════════════════════════════════════════
 //  STATE
 // ══════════════════════════════════════════
-let holdings = JSON.parse(localStorage.getItem('folio_h') || 'null');
-if (!holdings) {
-  holdings = [
-    { id:1, ticker:'AAPL', name:'Apple Inc.', avgPrice:165.20, qty:30, currency:'USD', current:0, change:0, changePct:0, sector:'기술' },
-    { id:2, ticker:'NVDA', name:'NVIDIA Corp.', avgPrice:485.00, qty:10, currency:'USD', current:0, change:0, changePct:0, sector:'반도체' },
-    { id:3, ticker:'MSFT', name:'Microsoft Corp.', avgPrice:310.50, qty:15, currency:'USD', current:0, change:0, changePct:0, sector:'기술' },
-    { id:4, ticker:'005930.KS', name:'삼성전자', avgPrice:68000, qty:50, currency:'KRW', current:0, change:0, changePct:0, sector:'반도체' },
-    { id:5, ticker:'JPM', name:'JPMorgan Chase', avgPrice:155.00, qty:20, currency:'USD', current:0, change:0, changePct:0, sector:'금융' },
-  ];
-}
-let trades = JSON.parse(localStorage.getItem('folio_t') || '{}');
-let watchlist = JSON.parse(localStorage.getItem('folio_w') || '["TSLA","BTC-USD","^IXIC"]');
-let appSettings = JSON.parse(localStorage.getItem('folio_settings') || '{}');
+const DEFAULT_HOLDINGS = [
+  { id:1, ticker:'AAPL', name:'Apple Inc.', avgPrice:165.20, qty:30, currency:'USD', current:0, change:0, changePct:0, sector:'기술' },
+  { id:2, ticker:'NVDA', name:'NVIDIA Corp.', avgPrice:485.00, qty:10, currency:'USD', current:0, change:0, changePct:0, sector:'반도체' },
+  { id:3, ticker:'MSFT', name:'Microsoft Corp.', avgPrice:310.50, qty:15, currency:'USD', current:0, change:0, changePct:0, sector:'기술' },
+  { id:4, ticker:'005930.KS', name:'삼성전자', avgPrice:68000, qty:50, currency:'KRW', current:0, change:0, changePct:0, sector:'반도체' },
+  { id:5, ticker:'JPM', name:'JPMorgan Chase', avgPrice:155.00, qty:20, currency:'USD', current:0, change:0, changePct:0, sector:'금융' },
+];
+const DEFAULT_WATCHLIST = ['TSLA','BTC-USD','^IXIC'];
+let holdings = [...DEFAULT_HOLDINGS];
+let trades = {};
+let watchlist = [...DEFAULT_WATCHLIST];
+let appSettings = {};
 // Default benchmarks
 if (!appSettings.benchmarks) appSettings.benchmarks = [
   {ticker:'^GSPC', name:'S&P 500', color:'#6b7280'},
@@ -953,8 +918,9 @@ async function syncStateToServer() {
 }
 
 function saveAllState() {
-  persistLocalState();
-  syncStateToServer();
+  syncStateToServer().then(ok => {
+    if (!ok) persistLocalState();
+  });
 }
 
 async function loadSyncedState() {
@@ -965,7 +931,6 @@ async function loadSyncedState() {
     const j = await r.json();
     if (!j.ok || !j.state) return false;
     applyStateSnapshot(j.state);
-    persistLocalState();
     return true;
   } catch (e) {
     return false;
@@ -1002,92 +967,6 @@ async function saveDailySnapshot() {
   } catch (e) {
     return false;
   }
-}
-
-function renderDailyPortfolioRows(items) {
-  const body = document.getElementById('dailyPortfolioBody');
-  if (!body) return;
-  if (!Array.isArray(items) || !items.length) {
-    body.innerHTML = '<tr><td colspan="4" class="returns-loading">저장된 일별 포트폴리오 데이터가 없습니다.</td></tr>';
-    return;
-  }
-  body.innerHTML = items.map(item => {
-    const d = item.snapshot_date || '-';
-    const mkt = fmtOk(Number(item.total_market_krw || 0));
-    const pl = Number(item.total_pl_krw || 0);
-    const plCls = pl >= 0 ? 'up' : 'down';
-    return `<tr>
-      <td>${d}</td>
-      <td>${mkt}</td>
-      <td class="${plCls}">${fmtOk(pl)}</td>
-      <td class="${plCls}">${fmtPct(Number(item.total_return_pct || 0))}</td>
-    </tr>`;
-  }).join('');
-}
-
-function ensureDailyTickerSelect() {
-  const sel = document.getElementById('dailyTickerSelect');
-  if (!sel) return '';
-  const tickers = [...new Set(holdings.map(h => (h.ticker || '').toUpperCase()).filter(Boolean))];
-  if (!tickers.length) {
-    sel.innerHTML = '<option value="">보유 종목 없음</option>';
-    return '';
-  }
-  const current = sel.value && tickers.includes(sel.value) ? sel.value : tickers[0];
-  sel.innerHTML = tickers.map(t => `<option value="${t}">${t}</option>`).join('');
-  sel.value = current;
-  return current;
-}
-
-async function loadDailyHoldingHistory() {
-  const body = document.getElementById('dailyHoldingBody');
-  if (!body) return;
-  const ticker = ensureDailyTickerSelect();
-  if (!ticker || !BACKEND_URL) {
-    body.innerHTML = '<tr><td colspan="4" class="returns-loading">종목을 선택하세요.</td></tr>';
-    return;
-  }
-  try {
-    const r = await fetch(`${BACKEND_URL}/api/portfolio/daily/holdings?key=${encodeURIComponent(PORTFOLIO_SYNC_KEY)}&ticker=${encodeURIComponent(ticker)}&days=30`);
-    const j = await r.json();
-    const items = Array.isArray(j.items) ? j.items : [];
-    if (!j.ok || !items.length) {
-      body.innerHTML = '<tr><td colspan="4" class="returns-loading">해당 종목 일별 데이터가 없습니다.</td></tr>';
-      return;
-    }
-    body.innerHTML = items.map(item => {
-      const pl = Number(item.pl_krw || 0);
-      const cls = pl >= 0 ? 'up' : 'down';
-      return `<tr>
-        <td>${item.snapshot_date || '-'}</td>
-        <td>${fmtLocal(Number(item.current_price || 0), item.currency || 'USD')}</td>
-        <td class="${cls}">${fmtOk(pl)}</td>
-        <td class="${cls}">${fmtPct(Number(item.return_pct || 0))}</td>
-      </tr>`;
-    }).join('');
-  } catch (e) {
-    body.innerHTML = '<tr><td colspan="4" class="returns-loading">종목 일별 데이터를 불러오지 못했습니다.</td></tr>';
-  }
-}
-
-async function loadDailySnapshots() {
-  const statusEl = document.getElementById('dailySnapshotStatus');
-  if (!BACKEND_URL) {
-    if (statusEl) statusEl.textContent = '백엔드 연결 필요';
-    return;
-  }
-  try {
-    const r = await fetch(`${BACKEND_URL}/api/portfolio/daily/portfolio?key=${encodeURIComponent(PORTFOLIO_SYNC_KEY)}&days=30`);
-    const j = await r.json();
-    const items = Array.isArray(j.items) ? j.items : [];
-    renderDailyPortfolioRows(items);
-    if (statusEl) statusEl.textContent = items.length ? `최근 ${items.length}일` : '데이터 없음';
-  } catch (e) {
-    renderDailyPortfolioRows([]);
-    if (statusEl) statusEl.textContent = '조회 실패';
-  }
-  ensureDailyTickerSelect();
-  await loadDailyHoldingHistory();
 }
 
 function parseYahooResponse(j, ticker) {
@@ -1228,7 +1107,7 @@ async function refreshAll() {
     const r=pm[h.ticker];
     if(r&&r.ok){ h.current=r.price; h.change=r.change; h.changePct=r.changePct; if(!h.name||h.name===h.ticker) h.name=r.name; if(!h.currency) h.currency=r.currency; }
   });
-  periodStartPrices = {};
+  serverPeriodReturns = null;
   benchmarkStartPrices = {};
   sp500Snapshot = null;
   saveData();
@@ -1243,7 +1122,6 @@ async function refreshAll() {
     }
   });
   renderAll();
-  await loadDailySnapshots();
   icon.classList.remove('spin');
   document.getElementById('lastUpdated').textContent='업데이트: '+new Date().toLocaleTimeString('ko-KR',{hour:'2-digit',minute:'2-digit'});
   const failedCount = Object.values(pm).filter(r => !r.ok).length;
@@ -1267,15 +1145,13 @@ async function refreshAll() {
 function renderAll() { renderMetrics(); renderPerfChart(curPeriod||'1M'); renderAlloc(); renderDashHoldings(); renderHoldings(); renderMovers(); }
 
 // ── METRICS & PERIOD RETURNS TABLE ──
-let periodStartPrices = {}; // { rangeKey: { ticker: startPrice } }
 let benchmarkStartPrices = {}; // { rangeKey: startPrice }
-let dailyBasePrices = null; // { ticker: baseCloseBeforeCurrentKSTTradingDay }
-let dailyBaseTradingDate = null;
 let dailyBenchmarkBasePrice = null;
 let dailyBenchmarkTradingDate = null;
 let sp500Snapshot = null;
 let periodLoadInFlight = null;
 let periodLoadDate = null;
+let serverPeriodReturns = null; // { 1d:{hasData,gainKrw,pct}, ... }
 let riskMetricsCache = null;
 const KST_OFFSET_MS = 9 * 60 * 60 * 1000;
 const KST_CUTOFF_HOUR = 9; // 한국 개장 기준
@@ -1288,33 +1164,6 @@ const PERIODS = [
   {key:'ytd', label:'YTD'},
   {key:'cost', label:'원금 대비'},
 ];
-
-async function fetchStartPrices(rangeKey) {
-  if (periodStartPrices[rangeKey]) return periodStartPrices[rangeKey];
-  const range = PERIOD_RANGE_MAP[rangeKey];
-  const tickers = [...new Set(holdings.map(h=>h.ticker))];
-  const results = {};
-  await Promise.all(tickers.map(async ticker=>{
-    if (BACKEND_URL) {
-      try {
-        const r = await fetch(`${BACKEND_URL}/api/history/${encodeURIComponent(ticker)}?range=${range}`);
-        if (r.ok) { const j=await r.json(); if(j.startPrice) { results[ticker]=j.startPrice; return; } }
-      } catch(e) {}
-    }
-    for (const host of ['query1','query2']) {
-      try {
-        const url=`https://${host}.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}?interval=1d&range=${range}`;
-        const r=await fetch(url,{mode:'cors',credentials:'omit'});
-        if (!r.ok) continue;
-        const j=await r.json();
-        const closes=j.chart?.result?.[0]?.indicators?.quote?.[0]?.close;
-        if (closes?.length) { results[ticker]=closes.find(c=>c!=null); return; }
-      } catch(e) {}
-    }
-  }));
-  periodStartPrices[rangeKey] = results;
-  return results;
-}
 
 async function fetchSp500Snapshot() {
   if (sp500Snapshot) return sp500Snapshot;
@@ -1387,29 +1236,6 @@ function extractDailyBaseFromChart(chartResult, tradingDateStr) {
     if (label < tradingDateStr) best = c;
   }
   return best;
-}
-
-async function fetchDailyBasePrices() {
-  const tickers = [...new Set(holdings.map(h=>h.ticker))];
-  const tradingDateStr = activeKstTradingDateStr();
-  if (dailyBasePrices && dailyBaseTradingDate === tradingDateStr) return dailyBasePrices;
-  const results = {};
-  await Promise.all(tickers.map(async ticker => {
-    for (const host of ['query1','query2']) {
-      try {
-        const url = `https://${host}.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}?interval=1d&range=1mo`;
-        const r = await fetch(url,{mode:'cors',credentials:'omit'});
-        if (!r.ok) continue;
-        const j = await r.json();
-        const chart = j.chart?.result?.[0];
-        const base = extractDailyBaseFromChart(chart, tradingDateStr);
-        if (Number.isFinite(base)) { results[ticker] = base; return; }
-      } catch(e) {}
-    }
-  }));
-  dailyBasePrices = results;
-  dailyBaseTradingDate = tradingDateStr;
-  return results;
 }
 
 async function fetchSp500DailyBasePrice() {
@@ -1486,28 +1312,40 @@ function calcSp500Return(periodKey) {
 }
 
 function calcPeriodGain(period) {
-  let gain=0, startValue=0;
-  holdings.forEach(h=>{
-    const {costKRW,mktKRW}=calcPL(h);
-    const refClose = getReferenceClosePrice(h);
-    if (period==='1d') {
-      const base = dailyBasePrices?.[h.ticker];
-      if (Number.isFinite(base) && base > 0 && Number.isFinite(refClose)) {
-        gain += toKRW((refClose - base) * h.qty, h.currency);
-        startValue += toKRW(base * h.qty, h.currency);
-        return;
-      }
-    } else if (period==='cost') {
-      gain+=mktKRW-costKRW; startValue+=costKRW;
-    } else {
-      const sp=periodStartPrices[period]||{};
-      const s=sp[h.ticker];
-      if (s&&refClose) { gain+=toKRW((refClose-s)*h.qty,h.currency); startValue+=toKRW(s*h.qty,h.currency); }
+  const serverData = serverPeriodReturns?.[period];
+  if (serverData && typeof serverData === 'object') {
+    const hasData = !!serverData.hasData && Number.isFinite(Number(serverData.gainKrw)) && Number.isFinite(Number(serverData.pct));
+    return {
+      gain: hasData ? Number(serverData.gainKrw) : 0,
+      pct: hasData ? Number(serverData.pct) : null,
+      hasData,
+    };
+  }
+  return { gain: 0, pct: null, hasData: false };
+}
+
+async function fetchPortfolioPeriodReturns() {
+  if (!BACKEND_URL) {
+    serverPeriodReturns = null;
+    return false;
+  }
+  try {
+    const r = await fetch(`${BACKEND_URL}/api/portfolio/period-returns?key=${encodeURIComponent(PORTFOLIO_SYNC_KEY)}`);
+    if (!r.ok) {
+      serverPeriodReturns = null;
+      return false;
     }
-  });
-  const pct=startValue>0?(gain/startValue)*100:null;
-  const has1dData = period === '1d' ? startValue > 0 : false;
-  return {gain, pct, hasData: has1dData||period==='cost'||(periodStartPrices[period]&&Object.keys(periodStartPrices[period]).length>0)};
+    const j = await r.json();
+    if (!j.ok || !j.periods || typeof j.periods !== 'object') {
+      serverPeriodReturns = null;
+      return false;
+    }
+    serverPeriodReturns = j.periods;
+    return true;
+  } catch (e) {
+    serverPeriodReturns = null;
+    return false;
+  }
 }
 
 function renderMetrics() {
@@ -1532,15 +1370,16 @@ function scheduleLoadAllPeriods() {
 async function loadAllPeriods(todayKey = activeKstTradingDateStr()) {
   const el = document.getElementById('returnsStatus');
   el.textContent='조회 중…';
-  await Promise.all([fetchSp500Snapshot(), fetchDailyBasePrices(), fetchSp500DailyBasePrice()]);
+  const periodOk = await fetchPortfolioPeriodReturns();
+  await Promise.all([fetchSp500Snapshot(), fetchSp500DailyBasePrice()]);
   updateReturnsRow('1d');
   const asyncPeriods = ['1w','1m','3m','ytd'];
   for (const p of asyncPeriods) {
-    await Promise.all([fetchStartPrices(p), fetchSp500StartPrice(p)]);
+    await fetchSp500StartPrice(p);
     updateReturnsRow(p);
   }
   periodLoadDate = todayKey;
-  el.textContent='';
+  el.textContent = periodOk ? '' : '백엔드 DB 수익률 데이터 없음';
 }
 
 function getPeriodDateLabel(key) {
@@ -2226,10 +2065,12 @@ function renderTradeLog(){
 let tickerTimeout;
 let priceTimeout;
 let _fullTicker = null; // 자동완성으로 선택된 전체 심볼 (예: 005930.KS)
+let tickerSuggestFocusIndex = -1;
 function closeTickerSuggest() {
   const box = document.getElementById('tickerSuggest');
   box.classList.remove('open');
   box.innerHTML = '';
+  tickerSuggestFocusIndex = -1;
 }
 function applyTickerSuggestion(item) {
   _fullTicker = item.symbol || '';
@@ -2259,7 +2100,7 @@ function renderTickerSuggestions(items) {
   const box = document.getElementById('tickerSuggest');
   if (!items.length) { closeTickerSuggest(); return; }
   box.innerHTML = items.map((s,idx)=>`
-    <div class="ticker-suggest-item" onclick="applyTickerSuggestion(window._tickerSuggestItems[${idx}])">
+    <div class="ticker-suggest-item" data-sidx="${idx}" onmousedown="event.preventDefault();applyTickerSuggestion(window._tickerSuggestItems[${idx}])">
       <div>
         <div class="ticker-code">${s.symbol}</div>
         <div class="ticker-meta">${s.name || s.symbol}</div>
@@ -2267,7 +2108,25 @@ function renderTickerSuggestions(items) {
       <div class="ticker-meta">${[s.exchange, s.currency].filter(Boolean).join(' · ')}</div>
     </div>`).join('');
   window._tickerSuggestItems = items;
+  tickerSuggestFocusIndex = -1;
   box.classList.add('open');
+}
+
+function moveTickerSuggestionFocus(step) {
+  const box = document.getElementById('tickerSuggest');
+  const items = box.querySelectorAll('.ticker-suggest-item');
+  if (!items.length) return;
+  tickerSuggestFocusIndex = (tickerSuggestFocusIndex + step + items.length) % items.length;
+  items.forEach((el, idx) => el.classList.toggle('active', idx === tickerSuggestFocusIndex));
+}
+
+function selectFocusedTickerSuggestion() {
+  if (!Array.isArray(window._tickerSuggestItems) || !window._tickerSuggestItems.length) return false;
+  const idx = tickerSuggestFocusIndex >= 0 ? tickerSuggestFocusIndex : 0;
+  const target = window._tickerSuggestItems[idx];
+  if (!target) return false;
+  applyTickerSuggestion(target);
+  return true;
 }
 function _runTickerFetch(){
   const t=document.getElementById('fTicker').value.trim();
@@ -2322,6 +2181,21 @@ function openModal(id=null){
   document.getElementById('fTicker').oninput=()=>{
     _fullTicker=null;
     _runTickerFetch();
+  };
+  document.getElementById('fTicker').onkeydown=(e)=>{
+    const box = document.getElementById('tickerSuggest');
+    if (!box.classList.contains('open')) return;
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      moveTickerSuggestionFocus(1);
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      moveTickerSuggestionFocus(-1);
+    } else if (e.key === 'Enter') {
+      if (selectFocusedTickerSuggestion()) e.preventDefault();
+    } else if (e.key === 'Escape') {
+      closeTickerSuggest();
+    }
   };
   document.getElementById('fTicker').onblur=()=>setTimeout(closeTickerSuggest,120);
 }
@@ -2526,15 +2400,23 @@ function openBenchmarkSettings() { openSettings(); }
 // ══════════════════════════════════════════
 document.getElementById('dashDate').textContent=new Date().toLocaleDateString('ko-KR',{year:'numeric',month:'long',day:'numeric',weekday:'long'});
 (async () => {
-  // F5 체감 속도를 위해 로컬 상태를 먼저 즉시 렌더링
-  renderAll();
-  await loadDailySnapshots();
-  // 서버 동기화 상태는 백그라운드에서 가져오고, 도착하면 한 번 더 렌더링
+  // 데이터 우선순위: 백엔드 DB → (실패 시) 로컬 백업 → 기본 샘플
   const synced = await loadSyncedState();
-  if (synced) {
-    renderAll();
-    await loadDailySnapshots();
+  if (!synced) {
+    const localHoldings = JSON.parse(localStorage.getItem('folio_h') || 'null');
+    const localTrades = JSON.parse(localStorage.getItem('folio_t') || 'null');
+    const localWatchlist = JSON.parse(localStorage.getItem('folio_w') || 'null');
+    const localSettings = JSON.parse(localStorage.getItem('folio_settings') || 'null');
+    if (Array.isArray(localHoldings)) holdings = localHoldings;
+    if (localTrades && typeof localTrades === 'object') trades = localTrades;
+    if (Array.isArray(localWatchlist)) watchlist = localWatchlist;
+    if (localSettings && typeof localSettings === 'object') appSettings = localSettings;
   }
+  if (!appSettings.benchmarks) appSettings.benchmarks = [
+    {ticker:'^GSPC', name:'S&P 500', color:'#6b7280'},
+    {ticker:'^KS11', name:'코스피', color:'#f59e0b'}
+  ];
+  renderAll();
   refreshAll();
 })();
 </script>
