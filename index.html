@@ -398,6 +398,41 @@ tr:hover td{background:rgba(255,255,255,0.02)}
       </div>
     </div>
 
+    <div class="card" style="margin-bottom:16px">
+      <div class="card-header">
+        <span class="card-title">Supabase 일별 누적 스냅샷</span>
+        <span class="card-sub" id="dailySnapshotStatus">최근 30일</span>
+      </div>
+      <div class="table-wrap" style="margin-bottom:12px">
+        <table class="returns-table">
+          <thead>
+            <tr>
+              <th>일자</th><th>총 평가액</th><th>누적 손익</th><th>누적 수익률</th>
+            </tr>
+          </thead>
+          <tbody id="dailyPortfolioBody">
+            <tr><td colspan="4" class="returns-loading">스냅샷 로딩 중...</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+        <span class="card-sub">개별 보유 종목 일별 추이</span>
+        <select class="form-input" id="dailyTickerSelect" style="max-width:220px;height:32px" onchange="loadDailyHoldingHistory()"></select>
+      </div>
+      <div class="table-wrap">
+        <table class="returns-table">
+          <thead>
+            <tr>
+              <th>일자</th><th>기준가</th><th>평가손익(억원)</th><th>수익률</th>
+            </tr>
+          </thead>
+          <tbody id="dailyHoldingBody">
+            <tr><td colspan="4" class="returns-loading">종목을 선택하세요.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
     <!-- Chart + Alloc -->
     <div class="dash-grid">
       <div class="card">
@@ -878,6 +913,7 @@ function resolveBackendUrl() {
 
 const BACKEND_URL = resolveBackendUrl();
 const PORTFOLIO_SYNC_KEY = 'default';
+let latestDailySnapshotDate = null;
 
 function getStateSnapshot() {
   return { holdings, trades, watchlist, appSettings };
@@ -934,6 +970,124 @@ async function loadSyncedState() {
   } catch (e) {
     return false;
   }
+}
+
+function getKSTSnapshotDate() {
+  const now = new Date();
+  const kst = new Date(now.getTime() + (9 * 60 * 60 * 1000));
+  return kst.toISOString().slice(0, 10);
+}
+
+async function saveDailySnapshot() {
+  if (!BACKEND_URL || !holdings.length) return false;
+  try {
+    const snapshotDate = getKSTSnapshotDate();
+    if (latestDailySnapshotDate === snapshotDate) return true;
+    const r = await fetch(`${BACKEND_URL}/api/portfolio/daily/snapshot`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        key: PORTFOLIO_SYNC_KEY,
+        state: getStateSnapshot(),
+        fxRates,
+        usdKrw,
+        snapshotDate
+      })
+    });
+    if (!r.ok) return false;
+    const j = await r.json();
+    if (!j.ok) return false;
+    latestDailySnapshotDate = snapshotDate;
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+function renderDailyPortfolioRows(items) {
+  const body = document.getElementById('dailyPortfolioBody');
+  if (!body) return;
+  if (!Array.isArray(items) || !items.length) {
+    body.innerHTML = '<tr><td colspan="4" class="returns-loading">저장된 일별 포트폴리오 데이터가 없습니다.</td></tr>';
+    return;
+  }
+  body.innerHTML = items.map(item => {
+    const d = item.snapshot_date || '-';
+    const mkt = fmtOk(Number(item.total_market_krw || 0));
+    const pl = Number(item.total_pl_krw || 0);
+    const plCls = pl >= 0 ? 'up' : 'down';
+    return `<tr>
+      <td>${d}</td>
+      <td>${mkt}</td>
+      <td class="${plCls}">${fmtOk(pl)}</td>
+      <td class="${plCls}">${fmtPct(Number(item.total_return_pct || 0))}</td>
+    </tr>`;
+  }).join('');
+}
+
+function ensureDailyTickerSelect() {
+  const sel = document.getElementById('dailyTickerSelect');
+  if (!sel) return '';
+  const tickers = [...new Set(holdings.map(h => (h.ticker || '').toUpperCase()).filter(Boolean))];
+  if (!tickers.length) {
+    sel.innerHTML = '<option value="">보유 종목 없음</option>';
+    return '';
+  }
+  const current = sel.value && tickers.includes(sel.value) ? sel.value : tickers[0];
+  sel.innerHTML = tickers.map(t => `<option value="${t}">${t}</option>`).join('');
+  sel.value = current;
+  return current;
+}
+
+async function loadDailyHoldingHistory() {
+  const body = document.getElementById('dailyHoldingBody');
+  if (!body) return;
+  const ticker = ensureDailyTickerSelect();
+  if (!ticker || !BACKEND_URL) {
+    body.innerHTML = '<tr><td colspan="4" class="returns-loading">종목을 선택하세요.</td></tr>';
+    return;
+  }
+  try {
+    const r = await fetch(`${BACKEND_URL}/api/portfolio/daily/holdings?key=${encodeURIComponent(PORTFOLIO_SYNC_KEY)}&ticker=${encodeURIComponent(ticker)}&days=30`);
+    const j = await r.json();
+    const items = Array.isArray(j.items) ? j.items : [];
+    if (!j.ok || !items.length) {
+      body.innerHTML = '<tr><td colspan="4" class="returns-loading">해당 종목 일별 데이터가 없습니다.</td></tr>';
+      return;
+    }
+    body.innerHTML = items.map(item => {
+      const pl = Number(item.pl_krw || 0);
+      const cls = pl >= 0 ? 'up' : 'down';
+      return `<tr>
+        <td>${item.snapshot_date || '-'}</td>
+        <td>${fmtLocal(Number(item.current_price || 0), item.currency || 'USD')}</td>
+        <td class="${cls}">${fmtOk(pl)}</td>
+        <td class="${cls}">${fmtPct(Number(item.return_pct || 0))}</td>
+      </tr>`;
+    }).join('');
+  } catch (e) {
+    body.innerHTML = '<tr><td colspan="4" class="returns-loading">종목 일별 데이터를 불러오지 못했습니다.</td></tr>';
+  }
+}
+
+async function loadDailySnapshots() {
+  const statusEl = document.getElementById('dailySnapshotStatus');
+  if (!BACKEND_URL) {
+    if (statusEl) statusEl.textContent = '백엔드 연결 필요';
+    return;
+  }
+  try {
+    const r = await fetch(`${BACKEND_URL}/api/portfolio/daily/portfolio?key=${encodeURIComponent(PORTFOLIO_SYNC_KEY)}&days=30`);
+    const j = await r.json();
+    const items = Array.isArray(j.items) ? j.items : [];
+    renderDailyPortfolioRows(items);
+    if (statusEl) statusEl.textContent = items.length ? `최근 ${items.length}일` : '데이터 없음';
+  } catch (e) {
+    renderDailyPortfolioRows([]);
+    if (statusEl) statusEl.textContent = '조회 실패';
+  }
+  ensureDailyTickerSelect();
+  await loadDailyHoldingHistory();
 }
 
 function parseYahooResponse(j, ticker) {
@@ -1078,6 +1232,7 @@ async function refreshAll() {
   benchmarkStartPrices = {};
   sp500Snapshot = null;
   saveData();
+  await saveDailySnapshot();
   watchlist.forEach(t=>{
     const r=pm[t], el=document.querySelector(`[data-watch="${t}"]`);
     if(el&&r){
@@ -1088,6 +1243,7 @@ async function refreshAll() {
     }
   });
   renderAll();
+  await loadDailySnapshots();
   icon.classList.remove('spin');
   document.getElementById('lastUpdated').textContent='업데이트: '+new Date().toLocaleTimeString('ko-KR',{hour:'2-digit',minute:'2-digit'});
   const failedCount = Object.values(pm).filter(r => !r.ok).length;
@@ -2372,9 +2528,13 @@ document.getElementById('dashDate').textContent=new Date().toLocaleDateString('k
 (async () => {
   // F5 체감 속도를 위해 로컬 상태를 먼저 즉시 렌더링
   renderAll();
+  await loadDailySnapshots();
   // 서버 동기화 상태는 백그라운드에서 가져오고, 도착하면 한 번 더 렌더링
   const synced = await loadSyncedState();
-  if (synced) renderAll();
+  if (synced) {
+    renderAll();
+    await loadDailySnapshots();
+  }
   refreshAll();
 })();
 </script>
