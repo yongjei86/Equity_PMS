@@ -933,15 +933,18 @@ function parseYahooResponse(j, ticker) {
 }
 
 async function fetchPrice(ticker) {
-  // 1순위: 로컬 백엔드 서버 (server.py)
+  // 1순위: 로컬 백엔드 서버 (server.py) — 5s 타임아웃
   if (BACKEND_URL) {
     try {
-      const r = await fetch(`${BACKEND_URL}/api/price/${encodeURIComponent(ticker)}`);
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), 5000);
+      const r = await fetch(`${BACKEND_URL}/api/price/${encodeURIComponent(ticker)}`, { signal: ctrl.signal });
+      clearTimeout(t);
       if (r.ok) {
         const j = await r.json();
         if (j.ok) return j;
       }
-    } catch(e) { /* 서버 미실행 시 다음으로 */ }
+    } catch(e) { /* 서버 미실행 또는 타임아웃 시 다음으로 */ }
   }
 
   // 2순위: Yahoo Finance 직접 접근 (query1, query2)
@@ -980,7 +983,7 @@ async function fetchFX() {
 }
 
 async function fetchTickerSuggestions(query) {
-  if (!query || query.length < 2) return [];
+  if (!query) return [];
   if (tickerSuggestAbort) tickerSuggestAbort.abort();
   tickerSuggestAbort = new AbortController();
   const signal = tickerSuggestAbort.signal;
@@ -1001,9 +1004,23 @@ async function refreshAll() {
   icon.classList.add('spin');
   await fetchFX();
   const tickers = [...new Set([...holdings.map(h=>h.ticker),...watchlist])];
-  const results = await Promise.all(tickers.map(t=>fetchPrice(t)));
-  const pm = {};
-  tickers.forEach((t,i)=>pm[t]=results[i]);
+  let pm = {};
+  // 배치 엔드포인트로 한 번에 조회 (서버에서 병렬 처리)
+  if (BACKEND_URL && tickers.length) {
+    try {
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), 15000);
+      const r = await fetch(`${BACKEND_URL}/api/prices?tickers=${encodeURIComponent(tickers.join(','))}`, { signal: ctrl.signal });
+      clearTimeout(t);
+      if (r.ok) pm = await r.json();
+    } catch(e) { /* 서버 불가 시 개별 조회로 폴백 */ }
+  }
+  // 배치에서 누락된 티커는 개별 조회 (서버 없는 경우 포함)
+  const missing = tickers.filter(t => !pm[t]);
+  if (missing.length) {
+    const results = await Promise.all(missing.map(t => fetchPrice(t)));
+    missing.forEach((t, i) => { pm[t] = results[i]; });
+  }
   holdings.forEach(h=>{
     const r=pm[h.ticker];
     if(r&&r.ok){ h.current=r.price; h.change=r.change; h.changePct=r.changePct; if(!h.name||h.name===h.ticker) h.name=r.name; if(!h.currency) h.currency=r.currency; }

@@ -6,6 +6,7 @@ import requests
 import os
 import json
 from threading import Lock
+from concurrent.futures import ThreadPoolExecutor
 
 app = Flask(__name__)
 CORS(app)
@@ -23,25 +24,17 @@ def get_price_data(ticker):
             return None
         change = price - prev
         change_pct = (change / prev) * 100 if prev else 0
-        name = getattr(info, 'description', None) or ticker
-        # fast_info doesn't have name; use t.info for name but it's slow
-        # use ticker symbol as fallback
-        try:
-            full_info = t.info
-            name = full_info.get('longName') or full_info.get('shortName') or ticker
-            currency = (full_info.get('currency') or 'USD').upper()
-        except Exception:
-            name = ticker
-            currency = 'USD'
+        # fast_info.currency is available without the slow t.info call
+        currency = (getattr(info, 'currency', None) or 'USD').upper()
         return {
             'price': round(price, 6),
             'change': round(change, 6),
             'changePct': round(change_pct, 4),
-            'name': name,
+            'name': ticker,
             'currency': currency,
             'ok': True,
         }
-    except Exception as e:
+    except Exception:
         return None
 
 
@@ -236,13 +229,16 @@ def prices():
     if not tickers:
         return jsonify({'error': 'tickers 파라미터가 필요합니다'}), 400
     ticker_list = [t.strip() for t in tickers.split(',') if t.strip()]
-    result = {}
-    for ticker in ticker_list:
+
+    def fetch_one(ticker):
         data = get_price_data(ticker)
-        result[ticker] = data if data else {
+        return ticker, data if data else {
             'ok': False, 'price': 0, 'change': 0, 'changePct': 0,
             'name': ticker, 'currency': 'USD'
         }
+
+    with ThreadPoolExecutor(max_workers=min(len(ticker_list), 8)) as ex:
+        result = dict(ex.map(lambda tk: fetch_one(tk), ticker_list))
     return jsonify(result)
 
 
@@ -310,7 +306,7 @@ def news(ticker):
 @app.route('/api/search')
 def search_ticker():
     query = (request.args.get('q') or '').strip()
-    if len(query) < 2:
+    if not query:
         return jsonify({'items': []})
     url = 'https://query2.finance.yahoo.com/v1/finance/search'
     params = {
