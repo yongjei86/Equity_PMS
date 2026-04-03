@@ -159,12 +159,17 @@ def _fetch_close_series_fdr(ticker, period='1y'):
 def _fdr_price_data(ticker):
     try:
         close = _fetch_close_series_fdr(ticker, period='1mo')
-        if close is None or len(close) < 2:
+        if close is None or len(close) < 1:
             return None
         price = float(close.iloc[-1])
-        prev = float(close.iloc[-2])
-        change = price - prev
-        change_pct = (change / prev) * 100 if prev else 0
+        if len(close) >= 2:
+            prev = float(close.iloc[-2])
+            change = price - prev
+            change_pct = (change / prev) * 100 if prev else 0
+        else:
+            prev = price
+            change = 0
+            change_pct = 0
         return {
             'price': round(price, 6),
             'change': round(change, 6),
@@ -516,7 +521,46 @@ def search_ticker():
         except Exception:
             pass
 
-    # 2순위: Yahoo Finance 검색 (폴백)
+    # 2순위: 한국 주식 코드/한글 검색 (FDR KRX 상장종목)
+    # 예) 005930, 삼성, 카카오
+    is_korean_hint = any('\uac00' <= ch <= '\ud7a3' for ch in query) or query.isdigit()
+    if is_korean_hint:
+        try:
+            krx = fdr.StockListing('KRX')
+            q = query.upper()
+            q_digits = ''.join(ch for ch in q if ch.isdigit())
+            code_col = 'Code' if 'Code' in krx.columns else 'Symbol'
+            name_col = 'Name' if 'Name' in krx.columns else None
+            market_col = 'Market' if 'Market' in krx.columns else None
+            matched = []
+            for _, row in krx.iterrows():
+                code = str(row.get(code_col, '')).strip()
+                name = str(row.get(name_col, '')).strip() if name_col else ''
+                market = str(row.get(market_col, '')).strip() if market_col else ''
+                if not code:
+                    continue
+                if q_digits and q_digits in code:
+                    pass
+                elif query.lower() in name.lower():
+                    pass
+                else:
+                    continue
+                suffix = '.KQ' if market.upper() == 'KOSDAQ' else '.KS'
+                matched.append({
+                    'symbol': f'{code}{suffix}',
+                    'name': name or code,
+                    'exchange': market or 'KRX',
+                    'currency': 'KRW',
+                    'type': 'EQUITY',
+                })
+                if len(matched) >= 10:
+                    break
+            if matched:
+                return jsonify({'items': matched})
+        except Exception:
+            pass
+
+    # 3순위: Yahoo Finance 검색 (폴백)
     try:
         resp = requests.get(
             'https://query2.finance.yahoo.com/v1/finance/search',
