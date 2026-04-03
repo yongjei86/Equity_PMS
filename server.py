@@ -12,8 +12,14 @@ app = Flask(__name__)
 CORS(app)
 ALPHA_VANTAGE_API_KEY = os.environ.get('ALPHA_VANTAGE_API_KEY', 'M23I4O2KN7VDGIL8')
 ALPHA_VANTAGE_BASE = 'https://www.alphavantage.co/query'
-SUPABASE_URL = (os.environ.get('SUPABASE_URL') or '').rstrip('/')
-SUPABASE_SERVICE_ROLE_KEY = os.environ.get('SUPABASE_SERVICE_ROLE_KEY') or os.environ.get('SUPABASE_KEY') or ''
+DEFAULT_SUPABASE_URL = 'https://iewzhfnalpqvlyaehvnq.supabase.co'
+DEFAULT_SUPABASE_KEY = 'sb_publishable_jew0PizzOC9CBB7_APnSzg_lE1i1yrP'
+SUPABASE_URL = (os.environ.get('SUPABASE_URL') or DEFAULT_SUPABASE_URL).rstrip('/')
+SUPABASE_SERVICE_ROLE_KEY = (
+    os.environ.get('SUPABASE_SERVICE_ROLE_KEY')
+    or os.environ.get('SUPABASE_KEY')
+    or DEFAULT_SUPABASE_KEY
+)
 
 # 거래소 코드 → 통화 매핑
 EXCHANGE_CURRENCY = {
@@ -438,8 +444,8 @@ def _supabase_request(method, path, *, params=None, payload=None, prefer=None):
 def _supabase_load_portfolio_state(key):
     holdings_params = {
         'portfolio_key': f'eq.{key}',
-        'select': 'holding_id,ticker,name,avg_price,qty,currency,sector,current,change,change_pct',
-        'order': 'holding_id.asc',
+        'select': 'holding_id,ticker,name,avg_price,qty,currency,sector,current,change,change_pct,sort_order',
+        'order': 'sort_order.asc,holding_id.asc',
         'limit': 5000,
     }
     holdings_data, holdings_err = _supabase_request('GET', 'holdings', params=holdings_params)
@@ -466,6 +472,18 @@ def _supabase_load_portfolio_state(key):
     if watchlist_err:
         return None, watchlist_err
 
+    settings_data, settings_err = _supabase_request(
+        'GET',
+        'portfolio_settings',
+        params={
+            'portfolio_key': f'eq.{key}',
+            'select': 'settings_json',
+            'limit': 1,
+        }
+    )
+    if settings_err:
+        return None, settings_err
+
     holdings = []
     for row in holdings_data if isinstance(holdings_data, list) else []:
         if not isinstance(row, dict):
@@ -481,6 +499,7 @@ def _supabase_load_portfolio_state(key):
             'current': _to_float(row.get('current'), 0),
             'change': _to_float(row.get('change'), 0),
             'changePct': _to_float(row.get('change_pct'), 0),
+            'sortOrder': int(_to_float(row.get('sort_order'), 0)),
         })
 
     trade_map = {}
@@ -509,11 +528,17 @@ def _supabase_load_portfolio_state(key):
         if ticker:
             watchlist.append(ticker)
 
+    app_settings = {}
+    if isinstance(settings_data, list) and settings_data:
+        app_settings = settings_data[0].get('settings_json') or {}
+        if not isinstance(app_settings, dict):
+            app_settings = {}
+
     return {
         'holdings': holdings,
         'trades': trade_map,
         'watchlist': watchlist,
-        'appSettings': {},
+        'appSettings': app_settings,
     }, None
 
 
@@ -521,8 +546,9 @@ def _supabase_save_portfolio_state(key, state):
     holdings = state.get('holdings') if isinstance(state.get('holdings'), list) else []
     trades = state.get('trades') if isinstance(state.get('trades'), dict) else {}
     watchlist = state.get('watchlist') if isinstance(state.get('watchlist'), list) else []
+    app_settings = state.get('appSettings') if isinstance(state.get('appSettings'), dict) else {}
 
-    for table_name in ('holdings', 'trades', 'watchlist'):
+    for table_name in ('holdings', 'trades', 'watchlist', 'portfolio_settings'):
         _, del_err = _supabase_request(
             'DELETE',
             table_name,
@@ -532,7 +558,7 @@ def _supabase_save_portfolio_state(key, state):
             return del_err
 
     holding_rows = []
-    for h in holdings:
+    for order_idx, h in enumerate(holdings):
         if not isinstance(h, dict):
             continue
         holding_rows.append({
@@ -547,6 +573,7 @@ def _supabase_save_portfolio_state(key, state):
             'current': _to_float(h.get('current'), 0),
             'change': _to_float(h.get('change'), 0),
             'change_pct': _to_float(h.get('changePct'), 0),
+            'sort_order': int(_to_float(h.get('sortOrder'), order_idx)),
         })
     if holding_rows:
         _, holdings_err = _supabase_request('POST', 'holdings', payload=holding_rows)
@@ -587,6 +614,18 @@ def _supabase_save_portfolio_state(key, state):
         _, watchlist_err = _supabase_request('POST', 'watchlist', payload=watchlist_rows)
         if watchlist_err:
             return watchlist_err
+
+    _, settings_err = _supabase_request(
+        'POST',
+        'portfolio_settings',
+        payload=[{
+            'portfolio_key': key,
+            'settings_json': app_settings,
+        }],
+        prefer='resolution=merge-duplicates'
+    )
+    if settings_err:
+        return settings_err
 
     return None
 
@@ -981,6 +1020,58 @@ def get_portfolio_state():
     if err:
         return jsonify({'ok': False, 'error': err, 'state': None}), 500
     return jsonify({'ok': True, 'state': state}), 200
+
+
+@app.route('/api/market/prev-close', methods=['GET'])
+def get_market_prev_close():
+    key = (request.args.get('key') or 'default').strip() or 'default'
+    tickers_param = (request.args.get('tickers') or '').strip()
+    tickers = [t.strip().upper() for t in tickers_param.split(',') if t.strip()]
+    if not tickers:
+        state, err = _supabase_load_portfolio_state(key)
+        if err:
+            return jsonify({'ok': False, 'error': err, 'prices': {}}), 500
+        tickers = sorted({
+            (h.get('ticker') or '').upper()
+            for h in state.get('holdings', [])
+            if isinstance(h, dict) and (h.get('ticker') or '').strip()
+        })
+    if not tickers:
+        return jsonify({'ok': True, 'prices': {}}), 200
+
+    in_clause = '(' + ','.join([f'"{t}"' for t in tickers]) + ')'
+    rows, err = _supabase_request(
+        'GET',
+        'market_prev_close',
+        params={
+            'ticker': f'in.{in_clause}',
+            'select': 'ticker,market_date,close_price,prev_close,change,change_pct',
+            'order': 'ticker.asc,market_date.desc',
+            'limit': len(tickers) * 10,
+        }
+    )
+    if err:
+        return jsonify({'ok': False, 'error': err, 'prices': {}}), 500
+
+    by_ticker = {}
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        ticker = (row.get('ticker') or '').upper()
+        if not ticker or ticker in by_ticker:
+            continue
+        close_price = _to_float(row.get('close_price'), 0)
+        prev_close = _to_float(row.get('prev_close'), 0)
+        change = _to_float(row.get('change'), close_price - prev_close)
+        change_pct = _to_float(row.get('change_pct'), (change / prev_close * 100) if prev_close else 0)
+        by_ticker[ticker] = {
+            'price': close_price,
+            'change': change,
+            'changePct': change_pct,
+            'ok': close_price > 0,
+            'marketDate': row.get('market_date'),
+        }
+    return jsonify({'ok': True, 'prices': by_ticker}), 200
 
 
 @app.route('/api/portfolio/state', methods=['POST'])
