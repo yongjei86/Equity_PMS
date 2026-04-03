@@ -878,6 +878,8 @@ function resolveBackendUrl() {
 
 const BACKEND_URL = resolveBackendUrl();
 const PORTFOLIO_SYNC_KEY = 'default';
+let latestDailySnapshotDate = null;
+let latestDailyPriceSnapshotDate = null;
 
 function getStateSnapshot() {
   return { holdings, trades, watchlist, appSettings };
@@ -931,6 +933,80 @@ async function loadSyncedState() {
     applyStateSnapshot(j.state);
     persistLocalState();
     return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+function getKSTSnapshotDate() {
+  const now = new Date();
+  const kst = new Date(now.getTime() + (9 * 60 * 60 * 1000));
+  return kst.toISOString().slice(0, 10);
+}
+
+async function saveDailySnapshot() {
+  if (!BACKEND_URL || !holdings.length) return false;
+  try {
+    const snapshotDate = getKSTSnapshotDate();
+    if (latestDailySnapshotDate === snapshotDate) return true;
+    const r = await fetch(`${BACKEND_URL}/api/portfolio/daily/snapshot`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        key: PORTFOLIO_SYNC_KEY,
+        state: getStateSnapshot(),
+        fxRates,
+        usdKrw,
+        snapshotDate
+      })
+    });
+    if (!r.ok) return false;
+    const j = await r.json();
+    if (!j.ok) return false;
+    latestDailySnapshotDate = snapshotDate;
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+async function saveDailyPriceSnapshot(priceMap) {
+  if (!BACKEND_URL || !priceMap || typeof priceMap !== 'object') return false;
+  try {
+    const snapshotDate = getKSTSnapshotDate();
+    if (latestDailyPriceSnapshotDate === snapshotDate) return true;
+    const r = await fetch(`${BACKEND_URL}/api/portfolio/daily/prices`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        key: PORTFOLIO_SYNC_KEY,
+        snapshotDate,
+        prices: priceMap
+      })
+    });
+    if (!r.ok) return false;
+    const j = await r.json();
+    if (!j.ok) return false;
+    latestDailyPriceSnapshotDate = snapshotDate;
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+async function syncTradesToServer() {
+  if (!BACKEND_URL) return false;
+  try {
+    const r = await fetch(`${BACKEND_URL}/api/portfolio/trades/sync`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        key: PORTFOLIO_SYNC_KEY,
+        trades,
+        holdings
+      })
+    });
+    return r.ok;
   } catch (e) {
     return false;
   }
@@ -1078,6 +1154,8 @@ async function refreshAll() {
   benchmarkStartPrices = {};
   sp500Snapshot = null;
   saveData();
+  await saveDailySnapshot();
+  await saveDailyPriceSnapshot(pm);
   watchlist.forEach(t=>{
     const r=pm[t], el=document.querySelector(`[data-watch="${t}"]`);
     if(el&&r){
@@ -2202,7 +2280,7 @@ function delHolding(id){
 //  PERSIST / CSV
 // ══════════════════════════════════════════
 function saveData(){saveAllState();}
-function saveTrades(){saveAllState();}
+function saveTrades(){saveAllState();syncTradesToServer();}
 function exportCSV(){
   const rows=[['티커','종목명','섹터','통화','평균단가','수량','현재가','평가액(억원)','평가손익(억원)','수익률(%)']];
   holdings.forEach(h=>{const{pl,pct,mktKRW}=calcPL(h);rows.push([h.ticker,h.name||h.ticker,h.sector,h.currency||'USD',h.avgPrice,h.qty,h.current||0,(mktKRW/1e8).toFixed(4),(pl/1e8).toFixed(4),pct.toFixed(2)]);});
@@ -2374,7 +2452,10 @@ document.getElementById('dashDate').textContent=new Date().toLocaleDateString('k
   renderAll();
   // 서버 동기화 상태는 백그라운드에서 가져오고, 도착하면 한 번 더 렌더링
   const synced = await loadSyncedState();
-  if (synced) renderAll();
+  if (synced) {
+    renderAll();
+    await syncTradesToServer();
+  }
   refreshAll();
 })();
 </script>
