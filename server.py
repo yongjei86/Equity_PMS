@@ -15,17 +15,17 @@ CORS(app)
 STATE_FILE = os.path.join(os.path.dirname(__file__), 'portfolio_state.json')
 STATE_LOCK = Lock()
 
-FINNHUB_API_KEY = os.environ.get('FINNHUB_API_KEY', '')
-FINNHUB_BASE = 'https://finnhub.io/api/v1'
+ALPHA_VANTAGE_API_KEY = os.environ.get('ALPHA_VANTAGE_API_KEY', 'M23I4O2KN7VDGIL8')
+ALPHA_VANTAGE_BASE = 'https://www.alphavantage.co/query'
 
 # 거래소 코드 → 통화 매핑
 EXCHANGE_CURRENCY = {
-    'KS': 'KRW', 'KQ': 'KRW',
-    'HK': 'HKD',
+    'KS': 'KRW', 'KQ': 'KRW', 'KRX': 'KRW',
+    'HK': 'HKD', 'HKG': 'HKD',
     'T': 'JPY',
     'L': 'GBP',
     'PA': 'EUR', 'DE': 'EUR', 'MI': 'EUR',
-    'SS': 'CNY', 'SZ': 'CNY',
+    'SS': 'CNY', 'SZ': 'CNY', 'SHH': 'CNY', 'SHZ': 'CNY',
 }
 
 INDEX_SYMBOL_MAP = {
@@ -62,26 +62,90 @@ def _normalize_ticker(ticker):
     return tk
 
 
-def yf_to_finnhub(ticker):
-    """Yahoo Finance 형식 → Finnhub 형식: 005930.KS → KS:005930"""
+def _ticker_to_alpha_symbol(ticker):
+    """Yahoo/FDR 친화 티커를 Alpha Vantage 심볼로 변환."""
     ticker = _normalize_ticker(ticker)
-    if '.' in ticker and not ticker.startswith('^') and '=X' not in ticker:
-        base, exchange = ticker.rsplit('.', 1)
-        return f"{exchange}:{base}"
-    return ticker
+    if ticker.startswith('^') or '=X' in ticker:
+        return ticker
+    if '.' not in ticker:
+        return ticker
+    base, exchange = ticker.rsplit('.', 1)
+    alpha_exchange_map = {
+        'KS': 'KRX', 'KQ': 'KRX',
+        'HK': 'HKG',
+        'SS': 'SHH', 'SZ': 'SHZ',
+    }
+    alpha_exchange = alpha_exchange_map.get(exchange, exchange)
+    return f'{base}.{alpha_exchange}'
 
 
-def finnhub_to_yf(symbol):
-    """Finnhub 형식 → Yahoo Finance 형식: KS:005930 → 005930.KS"""
+def _alpha_symbol_to_yf(symbol):
     symbol = (symbol or '').strip().upper()
-    if ':' in symbol:
-        exchange, base = symbol.split(':', 1)
-        if base.isdigit() and len(base) == 6 and exchange in KOREA_EXCHANGE_ALIASES:
-            if exchange in {'KQ', 'KOSDAQ'}:
-                return f'{base}.KQ'
-            return f'{base}.KS'
-        return f"{base}.{exchange}"
-    return _normalize_ticker(symbol)
+    if '.' not in symbol:
+        return _normalize_ticker(symbol)
+    base, exchange = symbol.rsplit('.', 1)
+    yf_exchange_map = {
+        'KRX': 'KS',
+        'HKG': 'HK',
+        'SHH': 'SS',
+        'SHZ': 'SZ',
+    }
+    yf_exchange = yf_exchange_map.get(exchange, exchange)
+    return _normalize_ticker(f'{base}.{yf_exchange}')
+
+
+def _alpha_vantage_query(params):
+    if not ALPHA_VANTAGE_API_KEY:
+        return None
+    try:
+        merged = dict(params)
+        merged['apikey'] = ALPHA_VANTAGE_API_KEY
+        r = requests.get(ALPHA_VANTAGE_BASE, params=merged, timeout=8)
+        r.raise_for_status()
+        data = r.json()
+        if not isinstance(data, dict):
+            return None
+        if data.get('Error Message') or data.get('Note'):
+            return None
+        return data
+    except Exception:
+        return None
+
+
+def _latest_market_close(series):
+    if series is None or series.empty:
+        return series
+    today = datetime.utcnow().date()
+    filtered = series[series.index.date < today]
+    if filtered is not None and not filtered.empty:
+        return filtered
+    return series
+
+
+def _parse_alpha_daily_series(data, ticker):
+    ts = data.get('Time Series (Daily)') if isinstance(data, dict) else None
+    if not ts or not isinstance(ts, dict):
+        return None
+    rows = []
+    for d, values in ts.items():
+        if not isinstance(values, dict):
+            continue
+        close_val = values.get('4. close') or values.get('5. adjusted close')
+        try:
+            rows.append((pd.to_datetime(d), float(close_val)))
+        except Exception:
+            continue
+    if not rows:
+        return None
+    rows.sort(key=lambda x: x[0])
+    idx = [x[0] for x in rows]
+    vals = [x[1] for x in rows]
+    s = pd.Series(vals, index=idx, name=ticker, dtype='float64')
+    s = s.dropna()
+    if s.empty:
+        return None
+    s = _latest_market_close(s)
+    return s if s is not None and not s.empty else None
 
 
 def _period_to_start_date(period):
@@ -136,20 +200,27 @@ def _infer_currency(ticker):
         return 'GBP'
     if ticker.endswith('.HK'):
         return 'HKD'
+    if ticker.endswith('.SS') or ticker.endswith('.SZ'):
+        return 'CNY'
     return 'USD'
 
 
 def _fetch_close_series_fdr(ticker, period='1y'):
     ticker = _normalize_ticker(ticker)
-    fdr_symbol = _yf_to_fdr_symbol(ticker)
-    if not fdr_symbol:
+    alpha_symbol = _ticker_to_alpha_symbol(ticker)
+    if not alpha_symbol:
+        return None
+    output_size = 'full' if period in {'2y', '5y', '10y', 'max'} else 'compact'
+    data = _alpha_vantage_query({
+        'function': 'TIME_SERIES_DAILY_ADJUSTED',
+        'symbol': alpha_symbol,
+        'outputsize': output_size,
+    })
+    s = _parse_alpha_daily_series(data, ticker)
+    if s is None or s.empty:
         return None
     start = _period_to_start_date(period)
-    end = datetime.utcnow().date()
-    df = fdr.DataReader(fdr_symbol, start=start, end=end)
-    if df is None or df.empty or 'Close' not in df.columns:
-        return None
-    s = df['Close'].dropna()
+    s = s[s.index.date >= start]
     if s.empty:
         return None
     s.name = ticker
@@ -158,7 +229,7 @@ def _fetch_close_series_fdr(ticker, period='1y'):
 
 def _fdr_price_data(ticker):
     try:
-        close = _fetch_close_series_fdr(ticker, period='1mo')
+        close = _fetch_close_series_fdr(ticker, period='3mo')
         if close is None or len(close) < 1:
             return None
         price = float(close.iloc[-1])
@@ -184,41 +255,34 @@ def _fdr_price_data(ticker):
 
 def get_price_data(ticker):
     ticker = _normalize_ticker(ticker)
-    # 1순위: FinanceDataReader
+    # 1순위: Alpha Vantage Daily 기반 전일 종가
     fdr_result = _fdr_price_data(ticker)
     if fdr_result is not None:
         return fdr_result
 
-    # 2순위: Finnhub (FDR 미지원 티커 폴백)
-    use_finnhub = FINNHUB_API_KEY and '=X' not in ticker and not ticker.startswith('^')
-    if use_finnhub:
-        try:
-            fh_symbol = yf_to_finnhub(ticker)
-            r = requests.get(
-                f'{FINNHUB_BASE}/quote',
-                params={'symbol': fh_symbol, 'token': FINNHUB_API_KEY},
-                timeout=5
-            )
-            if r.ok:
-                d = r.json()
-                price = d.get('c', 0)
-                prev = d.get('pc', 0)
-                if price and price > 0:
-                    change = price - prev
-                    change_pct = (change / prev * 100) if prev else 0
-                    exchange = fh_symbol.split(':')[0] if ':' in fh_symbol else 'US'
-                    currency = EXCHANGE_CURRENCY.get(exchange, 'USD')
-                    return {
-                        'price': round(price, 6),
-                        'change': round(change, 6),
-                        'changePct': round(change_pct, 4),
-                        'name': ticker,
-                        'currency': currency,
-                        'ok': True,
-                    }
-        except Exception:
-            pass
-
+    # 2순위: Global Quote (응답 축소 시)
+    try:
+        alpha_symbol = _ticker_to_alpha_symbol(ticker)
+        data = _alpha_vantage_query({'function': 'GLOBAL_QUOTE', 'symbol': alpha_symbol})
+        quote = data.get('Global Quote', {}) if isinstance(data, dict) else {}
+        if isinstance(quote, dict) and quote:
+            price = _to_float(quote.get('05. price'))
+            prev = _to_float(quote.get('08. previous close'))
+            if price > 0:
+                change = price - prev
+                change_pct = (change / prev * 100) if prev else 0
+                exchange = alpha_symbol.split('.')[-1] if '.' in alpha_symbol else 'US'
+                currency = EXCHANGE_CURRENCY.get(exchange, 'USD')
+                return {
+                    'price': round(price, 6),
+                    'change': round(change, 6),
+                    'changePct': round(change_pct, 4),
+                    'name': ticker,
+                    'currency': currency,
+                    'ok': True,
+                }
+    except Exception:
+        pass
     return None
 
 
@@ -488,38 +552,30 @@ def search_ticker():
     if not query:
         return jsonify({'items': []})
 
-    # 1순위: Finnhub 검색
-    if FINNHUB_API_KEY:
-        try:
-            r = requests.get(
-                f'{FINNHUB_BASE}/search',
-                params={'q': query, 'token': FINNHUB_API_KEY},
-                timeout=5
-            )
-            r.raise_for_status()
-            results = r.json().get('result', []) or []
-            items = []
-            for item in results:
-                fh_symbol = (item.get('symbol') or '').strip()
-                if not fh_symbol:
-                    continue
-                item_type = (item.get('type') or '').upper()
-                if item_type and item_type not in {'COMMON STOCK', 'ETP', 'ADR', 'GDR', ''}:
-                    continue
-                yf_symbol = finnhub_to_yf(fh_symbol)
-                exchange = fh_symbol.split(':')[0] if ':' in fh_symbol else 'US'
-                currency = EXCHANGE_CURRENCY.get(exchange, 'USD')
-                items.append({
-                    'symbol': yf_symbol,
-                    'name': item.get('description', fh_symbol),
-                    'exchange': item.get('displaySymbol', fh_symbol),
-                    'currency': currency,
-                    'type': item_type,
-                })
-            if items:
-                return jsonify({'items': items[:10]})
-        except Exception:
-            pass
+    # 1순위: Alpha Vantage SYMBOL_SEARCH
+    data = _alpha_vantage_query({'function': 'SYMBOL_SEARCH', 'keywords': query})
+    if data and isinstance(data.get('bestMatches'), list):
+        items = []
+        for item in data.get('bestMatches', []):
+            symbol = (item.get('1. symbol') or '').strip().upper()
+            if not symbol:
+                continue
+            region = (item.get('4. region') or '').strip()
+            item_type = (item.get('3. type') or '').strip().upper()
+            yf_symbol = _alpha_symbol_to_yf(symbol)
+            exchange = symbol.rsplit('.', 1)[-1] if '.' in symbol else (region or 'US')
+            currency = EXCHANGE_CURRENCY.get(exchange, (item.get('8. currency') or 'USD').upper())
+            items.append({
+                'symbol': yf_symbol,
+                'name': item.get('2. name') or symbol,
+                'exchange': region or exchange,
+                'currency': currency,
+                'type': item_type or 'EQUITY',
+            })
+            if len(items) >= 10:
+                break
+        if items:
+            return jsonify({'items': items})
 
     # 2순위: 한국 주식 코드/한글 검색 (FDR KRX 상장종목)
     # 예) 005930, 삼성, 카카오
