@@ -22,10 +22,16 @@ ALPHA_VANTAGE_BASE = 'https://www.alphavantage.co/query'
 EXCHANGE_CURRENCY = {
     'KS': 'KRW', 'KQ': 'KRW', 'KRX': 'KRW',
     'HK': 'HKD', 'HKG': 'HKD',
-    'T': 'JPY',
+    'T': 'JPY', 'TRT': 'JPY', 'TYO': 'JPY',
+    'TW': 'TWD', 'TWO': 'TWD', 'TAI': 'TWD',
     'L': 'GBP',
     'PA': 'EUR', 'DE': 'EUR', 'MI': 'EUR',
     'SS': 'CNY', 'SZ': 'CNY', 'SHH': 'CNY', 'SHZ': 'CNY',
+    'BSE': 'INR', 'BOM': 'INR', 'NSE': 'INR', 'NSI': 'INR',
+    'SET': 'THB', 'BKK': 'THB',
+    'KLS': 'MYR', 'KLSE': 'MYR',
+    'JKT': 'IDR',
+    'SGX': 'SGD', 'SES': 'SGD', 'ST': 'SGD',
 }
 
 INDEX_SYMBOL_MAP = {
@@ -73,6 +79,8 @@ def _ticker_to_alpha_symbol(ticker):
     alpha_exchange_map = {
         'KS': 'KRX', 'KQ': 'KRX',
         'HK': 'HKG',
+        'T': 'TRT',
+        'TW': 'TWO',
         'SS': 'SHH', 'SZ': 'SHZ',
     }
     alpha_exchange = alpha_exchange_map.get(exchange, exchange)
@@ -87,6 +95,10 @@ def _alpha_symbol_to_yf(symbol):
     yf_exchange_map = {
         'KRX': 'KS',
         'HKG': 'HK',
+        'TRT': 'T',
+        'TYO': 'T',
+        'TWO': 'TW',
+        'TAI': 'TW',
         'SHH': 'SS',
         'SHZ': 'SZ',
     }
@@ -196,12 +208,18 @@ def _infer_currency(ticker):
         return 'KRW'
     if ticker.endswith('.T'):
         return 'JPY'
+    if ticker.endswith('.TW'):
+        return 'TWD'
     if ticker.endswith('.L'):
         return 'GBP'
     if ticker.endswith('.HK'):
         return 'HKD'
     if ticker.endswith('.SS') or ticker.endswith('.SZ'):
         return 'CNY'
+    if ticker.endswith('.NS') or ticker.endswith('.BO'):
+        return 'INR'
+    if ticker.endswith('.SI'):
+        return 'SGD'
     return 'USD'
 
 
