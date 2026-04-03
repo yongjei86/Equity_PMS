@@ -17,6 +17,8 @@ STATE_LOCK = Lock()
 
 ALPHA_VANTAGE_API_KEY = os.environ.get('ALPHA_VANTAGE_API_KEY', 'M23I4O2KN7VDGIL8')
 ALPHA_VANTAGE_BASE = 'https://www.alphavantage.co/query'
+SUPABASE_URL = (os.environ.get('SUPABASE_URL') or '').rstrip('/')
+SUPABASE_SERVICE_ROLE_KEY = os.environ.get('SUPABASE_SERVICE_ROLE_KEY') or os.environ.get('SUPABASE_KEY') or ''
 
 # 거래소 코드 → 통화 매핑
 EXCHANGE_CURRENCY = {
@@ -403,6 +405,19 @@ def _to_float(value, default=0.0):
 
 
 def load_state():
+    if _supabase_enabled():
+        data, err = _supabase_request('GET', 'portfolio_states', params={'select': 'portfolio_key,state_json'})
+        if not err and isinstance(data, list):
+            states = {}
+            for row in data:
+                if not isinstance(row, dict):
+                    continue
+                k = (row.get('portfolio_key') or '').strip()
+                v = row.get('state_json')
+                if k and isinstance(v, dict):
+                    states[k] = v
+            if states:
+                return states
     if not os.path.exists(STATE_FILE):
         return {}
     try:
@@ -414,8 +429,68 @@ def load_state():
 
 
 def save_state(state_obj):
+    if _supabase_enabled():
+        rows = []
+        for key, state_json in (state_obj or {}).items():
+            if not isinstance(state_json, dict):
+                continue
+            rows.append({'portfolio_key': str(key), 'state_json': state_json})
+        if rows:
+            _supabase_request(
+                'POST',
+                'portfolio_states',
+                payload=rows,
+                prefer='resolution=merge-duplicates,return=minimal'
+            )
+        return
     with open(STATE_FILE, 'w', encoding='utf-8') as f:
         json.dump(state_obj, f, ensure_ascii=False, indent=2)
+
+
+def _supabase_enabled():
+    return bool(SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY)
+
+
+def _supabase_headers():
+    return {
+        'apikey': SUPABASE_SERVICE_ROLE_KEY,
+        'Authorization': f'Bearer {SUPABASE_SERVICE_ROLE_KEY}',
+        'Content-Type': 'application/json',
+    }
+
+
+def _supabase_request(method, path, *, params=None, payload=None, prefer=None):
+    if not _supabase_enabled():
+        return None, 'Supabase 환경변수가 설정되지 않았습니다.'
+    headers = _supabase_headers()
+    if prefer:
+        headers['Prefer'] = prefer
+    try:
+        resp = requests.request(
+            method.upper(),
+            f'{SUPABASE_URL}/rest/v1/{path.lstrip("/")}',
+            params=params,
+            json=payload,
+            headers=headers,
+            timeout=10
+        )
+        if not resp.ok:
+            return None, f'Supabase API 오류({resp.status_code}): {resp.text[:200]}'
+        if not resp.text:
+            return None, None
+        return resp.json(), None
+    except Exception as e:
+        return None, str(e)
+
+
+def _to_krw(amount, currency, fx_rates, usd_krw):
+    cur = (currency or 'USD').upper()
+    if cur == 'KRW':
+        return float(amount)
+    denom = _to_float(fx_rates.get(cur), 0)
+    if denom <= 0:
+        denom = 1
+    return (float(amount) / denom) * float(usd_krw)
 
 
 def calculate_portfolio_metrics(tickers, weights=None, period='1y', benchmark='^GSPC', risk_free_rate=0.03):
@@ -816,6 +891,227 @@ def set_portfolio_state():
         all_states[key] = safe_state
         save_state(all_states)
     return jsonify({'ok': True}), 200
+
+
+@app.route('/api/portfolio/daily/snapshot', methods=['POST'])
+def upsert_daily_snapshot():
+    payload = request.get_json(silent=True) or {}
+    key = (payload.get('key') or 'default').strip() or 'default'
+    state = payload.get('state') if isinstance(payload.get('state'), dict) else {}
+    fx_rates = payload.get('fxRates') if isinstance(payload.get('fxRates'), dict) else {}
+    usd_krw = _to_float(payload.get('usdKrw'), 1360)
+    snapshot_date = (payload.get('snapshotDate') or datetime.utcnow().date().isoformat()).strip()
+
+    holdings = state.get('holdings') if isinstance(state.get('holdings'), list) else []
+    total_cost = 0.0
+    total_market = 0.0
+    holding_rows = []
+
+    for h in holdings:
+        if not isinstance(h, dict):
+            continue
+        qty = _to_float(h.get('qty'), 0)
+        avg_price = _to_float(h.get('avgPrice'), 0)
+        current = _to_float(h.get('current'), 0)
+        change = _to_float(h.get('change'), 0)
+        reference_close = current - change if current > 0 else avg_price
+        if reference_close <= 0:
+            reference_close = avg_price
+        currency = (h.get('currency') or 'USD').upper()
+
+        cost_krw = _to_krw(avg_price * qty, currency, fx_rates, usd_krw)
+        market_krw = _to_krw(reference_close * qty, currency, fx_rates, usd_krw)
+        pl_krw = market_krw - cost_krw
+        return_pct = (pl_krw / cost_krw * 100) if cost_krw > 0 else 0
+        total_cost += cost_krw
+        total_market += market_krw
+
+        holding_rows.append({
+            'portfolio_key': key,
+            'snapshot_date': snapshot_date,
+            'holding_id': str(h.get('id') or ''),
+            'ticker': (h.get('ticker') or '').upper(),
+            'name': h.get('name') or '',
+            'currency': currency,
+            'qty': qty,
+            'avg_price': avg_price,
+            'current_price': reference_close,
+            'market_value_krw': round(market_krw, 4),
+            'pl_krw': round(pl_krw, 4),
+            'return_pct': round(return_pct, 6),
+        })
+
+    total_pl = total_market - total_cost
+    total_return_pct = (total_pl / total_cost * 100) if total_cost > 0 else 0
+    portfolio_row = {
+        'portfolio_key': key,
+        'snapshot_date': snapshot_date,
+        'holdings_count': len(holding_rows),
+        'total_cost_krw': round(total_cost, 4),
+        'total_market_krw': round(total_market, 4),
+        'total_pl_krw': round(total_pl, 4),
+        'total_return_pct': round(total_return_pct, 6),
+    }
+
+    p_data, p_err = _supabase_request(
+        'POST',
+        'portfolio_daily_snapshots',
+        payload=[portfolio_row],
+        prefer='resolution=merge-duplicates,return=representation'
+    )
+    if p_err:
+        return jsonify({'ok': False, 'error': p_err}), 500
+
+    h_data = []
+    if holding_rows:
+        h_data, h_err = _supabase_request(
+            'POST',
+            'holding_daily_snapshots',
+            payload=holding_rows,
+            prefer='resolution=merge-duplicates,return=representation'
+        )
+        if h_err:
+            return jsonify({'ok': False, 'error': h_err}), 500
+
+    return jsonify({
+        'ok': True,
+        'snapshotDate': snapshot_date,
+        'portfolio': p_data[0] if isinstance(p_data, list) and p_data else portfolio_row,
+        'holdingCount': len(h_data) if isinstance(h_data, list) else len(holding_rows),
+    }), 200
+
+
+@app.route('/api/portfolio/daily/prices', methods=['POST'])
+def upsert_daily_prices():
+    payload = request.get_json(silent=True) or {}
+    key = (payload.get('key') or 'default').strip() or 'default'
+    prices = payload.get('prices') if isinstance(payload.get('prices'), dict) else {}
+    snapshot_date = (payload.get('snapshotDate') or datetime.utcnow().date().isoformat()).strip()
+    rows = []
+    for ticker, p in prices.items():
+        if not isinstance(p, dict):
+            continue
+        rows.append({
+            'portfolio_key': key,
+            'snapshot_date': snapshot_date,
+            'ticker': str(ticker).upper(),
+            'name': p.get('name') or str(ticker).upper(),
+            'currency': (p.get('currency') or 'USD').upper(),
+            'close_price': _to_float(p.get('price'), 0),
+            'change_value': _to_float(p.get('change'), 0),
+            'change_pct': _to_float(p.get('changePct'), 0),
+            'is_ok': bool(p.get('ok')),
+        })
+    if not rows:
+        return jsonify({'ok': True, 'saved': 0}), 200
+    _, err = _supabase_request(
+        'POST',
+        'daily_market_prices',
+        payload=rows,
+        prefer='resolution=merge-duplicates,return=minimal'
+    )
+    if err:
+        return jsonify({'ok': False, 'error': err}), 500
+    return jsonify({'ok': True, 'saved': len(rows), 'snapshotDate': snapshot_date}), 200
+
+
+@app.route('/api/portfolio/trades/sync', methods=['POST'])
+def sync_trade_history():
+    payload = request.get_json(silent=True) or {}
+    key = (payload.get('key') or 'default').strip() or 'default'
+    trades_obj = payload.get('trades') if isinstance(payload.get('trades'), dict) else {}
+    holdings = payload.get('holdings') if isinstance(payload.get('holdings'), list) else []
+    holding_map = {str(h.get('id')): h for h in holdings if isinstance(h, dict)}
+
+    rows = []
+    for holding_id, trade_list in trades_obj.items():
+        if not isinstance(trade_list, list):
+            continue
+        holding = holding_map.get(str(holding_id), {})
+        ticker = (holding.get('ticker') or '').upper()
+        for t in trade_list:
+            if not isinstance(t, dict):
+                continue
+            rows.append({
+                'portfolio_key': key,
+                'holding_id': str(holding_id),
+                'trade_id': str(t.get('id') or ''),
+                'ticker': ticker,
+                'trade_date': t.get('date') or None,
+                'trade_type': (t.get('type') or '').lower(),
+                'price': _to_float(t.get('price'), 0),
+                'qty': _to_float(t.get('qty'), 0),
+                'memo': t.get('memo') or '',
+            })
+    if not rows:
+        return jsonify({'ok': True, 'saved': 0}), 200
+    _, err = _supabase_request(
+        'POST',
+        'trade_history',
+        payload=rows,
+        prefer='resolution=merge-duplicates,return=minimal'
+    )
+    if err:
+        return jsonify({'ok': False, 'error': err}), 500
+    return jsonify({'ok': True, 'saved': len(rows)}), 200
+
+
+@app.route('/api/portfolio/daily/portfolio', methods=['GET'])
+def get_portfolio_daily_history():
+    key = (request.args.get('key') or 'default').strip() or 'default'
+    days = max(1, min(_to_float(request.args.get('days'), 30), 365))
+    params = {
+        'portfolio_key': f'eq.{key}',
+        'select': 'snapshot_date,total_cost_krw,total_market_krw,total_pl_krw,total_return_pct,holdings_count',
+        'order': 'snapshot_date.desc',
+        'limit': int(days),
+    }
+    data, err = _supabase_request('GET', 'portfolio_daily_snapshots', params=params)
+    if err:
+        return jsonify({'ok': False, 'error': err, 'items': []}), 500
+    items = list(reversed(data if isinstance(data, list) else []))
+    return jsonify({'ok': True, 'items': items}), 200
+
+
+@app.route('/api/portfolio/daily/prices', methods=['GET'])
+def get_daily_prices():
+    key = (request.args.get('key') or 'default').strip() or 'default'
+    ticker = (request.args.get('ticker') or '').strip().upper()
+    days = max(1, min(_to_float(request.args.get('days'), 30), 365))
+    params = {
+        'portfolio_key': f'eq.{key}',
+        'select': 'snapshot_date,ticker,name,currency,close_price,change_value,change_pct,is_ok',
+        'order': 'snapshot_date.desc',
+        'limit': int(days),
+    }
+    if ticker:
+        params['ticker'] = f'eq.{ticker}'
+    data, err = _supabase_request('GET', 'daily_market_prices', params=params)
+    if err:
+        return jsonify({'ok': False, 'error': err, 'items': []}), 500
+    items = list(reversed(data if isinstance(data, list) else []))
+    return jsonify({'ok': True, 'items': items}), 200
+
+
+@app.route('/api/portfolio/daily/holdings', methods=['GET'])
+def get_holding_daily_history():
+    key = (request.args.get('key') or 'default').strip() or 'default'
+    ticker = (request.args.get('ticker') or '').strip().upper()
+    if not ticker:
+        return jsonify({'ok': False, 'error': 'ticker 파라미터가 필요합니다.', 'items': []}), 400
+    days = max(1, min(_to_float(request.args.get('days'), 30), 365))
+    params = {
+        'portfolio_key': f'eq.{key}',
+        'ticker': f'eq.{ticker}',
+        'select': 'snapshot_date,ticker,name,qty,avg_price,current_price,market_value_krw,pl_krw,return_pct,currency',
+        'order': 'snapshot_date.desc',
+        'limit': int(days),
+    }
+    data, err = _supabase_request('GET', 'holding_daily_snapshots', params=params)
+    if err:
+        return jsonify({'ok': False, 'error': err, 'items': []}), 500
+    items = list(reversed(data if isinstance(data, list) else []))
+    return jsonify({'ok': True, 'items': items}), 200
 
 
 @app.route('/health')
