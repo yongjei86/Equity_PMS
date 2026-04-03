@@ -992,6 +992,100 @@ def get_holding_daily_history():
     return jsonify({'ok': True, 'items': items}), 200
 
 
+@app.route('/api/portfolio/period-returns', methods=['GET'])
+def get_portfolio_period_returns():
+    key = (request.args.get('key') or 'default').strip() or 'default'
+    params = {
+        'portfolio_key': f'eq.{key}',
+        'select': 'snapshot_date,total_cost_krw,total_market_krw,total_pl_krw',
+        'order': 'snapshot_date.asc',
+        'limit': 5000,
+    }
+    data, err = _supabase_request('GET', 'portfolio_daily_snapshots', params=params)
+    if err:
+        return jsonify({'ok': False, 'error': err, 'periods': {}}), 500
+
+    rows = []
+    for row in (data if isinstance(data, list) else []):
+        if not isinstance(row, dict):
+            continue
+        d = row.get('snapshot_date')
+        try:
+            d_obj = datetime.strptime(str(d), '%Y-%m-%d').date()
+        except Exception:
+            continue
+        rows.append({
+            'snapshot_date': d_obj,
+            'snapshot_date_str': str(d_obj),
+            'total_market_krw': _to_float(row.get('total_market_krw'), 0),
+            'total_cost_krw': _to_float(row.get('total_cost_krw'), 0),
+            'total_pl_krw': _to_float(row.get('total_pl_krw'), 0),
+        })
+
+    if not rows:
+        return jsonify({'ok': True, 'asOfDate': None, 'periods': {}}), 200
+
+    latest = rows[-1]
+    latest_date = latest['snapshot_date']
+    latest_market = latest['total_market_krw']
+
+    def find_on_or_before(target_date):
+        found = None
+        for r in rows:
+            if r['snapshot_date'] <= target_date:
+                found = r
+            else:
+                break
+        return found
+
+    def as_period(base_row):
+        if not base_row:
+            return {'hasData': False, 'gainKrw': None, 'pct': None, 'baseDate': None}
+        base_market = _to_float(base_row.get('total_market_krw'), 0)
+        if base_market <= 0:
+            return {'hasData': False, 'gainKrw': None, 'pct': None, 'baseDate': base_row.get('snapshot_date_str')}
+        gain = latest_market - base_market
+        pct = (gain / base_market * 100) if base_market > 0 else None
+        return {
+            'hasData': True,
+            'gainKrw': round(gain, 4),
+            'pct': round(pct, 6) if pct is not None else None,
+            'baseDate': base_row.get('snapshot_date_str'),
+        }
+
+    one_day_base = rows[-2] if len(rows) >= 2 else None
+    period_targets = {
+        '1w': latest_date - timedelta(days=7),
+        '1m': latest_date - timedelta(days=30),
+        '3m': latest_date - timedelta(days=90),
+        'ytd': datetime(latest_date.year, 1, 1).date(),
+    }
+    periods = {
+        '1d': as_period(one_day_base),
+    }
+    for p, target in period_targets.items():
+        periods[p] = as_period(find_on_or_before(target))
+
+    latest_cost = _to_float(latest.get('total_cost_krw'), 0)
+    if latest_cost > 0:
+        cost_gain = latest_market - latest_cost
+        periods['cost'] = {
+            'hasData': True,
+            'gainKrw': round(cost_gain, 4),
+            'pct': round(cost_gain / latest_cost * 100, 6),
+            'baseDate': latest.get('snapshot_date_str'),
+        }
+    else:
+        periods['cost'] = {'hasData': False, 'gainKrw': None, 'pct': None, 'baseDate': latest.get('snapshot_date_str')}
+
+    return jsonify({
+        'ok': True,
+        'asOfDate': latest.get('snapshot_date_str'),
+        'periods': periods,
+        'samples': len(rows),
+    }), 200
+
+
 @app.route('/health')
 def health():
     return jsonify({'status': 'ok'})

@@ -1,6 +1,6 @@
 # portfolio-management
 
-Supabase를 사용해 **포트폴리오 전체/개별 보유 종목의 일별 스냅샷을 누적 저장**하고, 프론트엔드에서 이를 조회할 수 있도록 구성되어 있습니다.
+Supabase를 사용해 **포트폴리오 상태와 일별 스냅샷 데이터**를 저장하도록 구성되어 있습니다.
 
 ## 1) 환경 변수
 
@@ -55,4 +55,6 @@ create table if not exists public.holding_daily_snapshots (
 - 프론트엔드가 가격 새로고침(`refreshAll`) 완료 후 `/api/portfolio/daily/snapshot` 호출
 - 백엔드가 현재 보유 종목 상태로 KRW 기준 평가액/손익 계산
 - Supabase `upsert`로 날짜 단위 누적 저장
-- 대시보드에서 최근 30일 포트폴리오/선택 종목의 일별 히스토리를 표시
+- 기간별 수익률은 `/api/portfolio/period-returns`에서 Supabase의 포트폴리오 일별 기준가(`total_market_krw`)를 기반으로 계산
+- 프론트엔드는 백엔드 DB 결과를 우선 사용하고, 백엔드 장애 시에만 로컬 백업 상태를 제한적으로 사용
+- 일별 스냅샷 데이터는 Supabase에 누적 저장되며, 필요 시 별도 화면/리포트에서 조회 가능
