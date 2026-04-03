@@ -5,16 +5,11 @@ import numpy as np
 import pandas as pd
 import requests
 import os
-import json
-from threading import Lock
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 
 app = Flask(__name__)
 CORS(app)
-STATE_FILE = os.path.join(os.path.dirname(__file__), 'portfolio_state.json')
-STATE_LOCK = Lock()
-
 ALPHA_VANTAGE_API_KEY = os.environ.get('ALPHA_VANTAGE_API_KEY', 'M23I4O2KN7VDGIL8')
 ALPHA_VANTAGE_BASE = 'https://www.alphavantage.co/query'
 SUPABASE_URL = (os.environ.get('SUPABASE_URL') or '').rstrip('/')
@@ -402,22 +397,6 @@ def _to_float(value, default=0.0):
         return float(value)
     except (TypeError, ValueError):
         return default
-
-
-def load_state():
-    if not os.path.exists(STATE_FILE):
-        return {}
-    try:
-        with open(STATE_FILE, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-            return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
-
-
-def save_state(state_obj):
-    with open(STATE_FILE, 'w', encoding='utf-8') as f:
-        json.dump(state_obj, f, ensure_ascii=False, indent=2)
 
 
 def _supabase_enabled():
@@ -996,14 +975,11 @@ def portfolio_metrics():
 @app.route('/api/portfolio/state', methods=['GET'])
 def get_portfolio_state():
     key = (request.args.get('key') or 'default').strip() or 'default'
-    if _supabase_enabled():
-        state, err = _supabase_load_portfolio_state(key)
-        if err:
-            return jsonify({'ok': False, 'error': err, 'state': None}), 500
-        return jsonify({'ok': True, 'state': state}), 200
-    with STATE_LOCK:
-        all_states = load_state()
-        state = all_states.get(key)
+    if not _supabase_enabled():
+        return jsonify({'ok': False, 'error': 'Supabase 환경변수가 설정되지 않았습니다.', 'state': None}), 503
+    state, err = _supabase_load_portfolio_state(key)
+    if err:
+        return jsonify({'ok': False, 'error': err, 'state': None}), 500
     return jsonify({'ok': True, 'state': state}), 200
 
 
@@ -1020,15 +996,11 @@ def set_portfolio_state():
         'watchlist': state.get('watchlist') if isinstance(state.get('watchlist'), list) else [],
         'appSettings': state.get('appSettings') if isinstance(state.get('appSettings'), dict) else {},
     }
-    if _supabase_enabled():
-        err = _supabase_save_portfolio_state(key, safe_state)
-        if err:
-            return jsonify({'ok': False, 'error': err}), 500
-        return jsonify({'ok': True}), 200
-    with STATE_LOCK:
-        all_states = load_state()
-        all_states[key] = safe_state
-        save_state(all_states)
+    if not _supabase_enabled():
+        return jsonify({'ok': False, 'error': 'Supabase 환경변수가 설정되지 않았습니다.'}), 503
+    err = _supabase_save_portfolio_state(key, safe_state)
+    if err:
+        return jsonify({'ok': False, 'error': err}), 500
     return jsonify({'ok': True}), 200
 
 
