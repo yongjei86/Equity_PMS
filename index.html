@@ -367,7 +367,6 @@ tr:hover td{background:rgba(255,255,255,0.02)}
       </svg>
       <span>가격 새로고침</span>
     </button>
-    <div id="autoRefreshCountdown" style="font-size:10px;color:var(--muted);text-align:center;margin-top:4px"></div>
     <button class="refresh-btn" onclick="openSettings()" style="margin-top:6px;opacity:0.7">⚙ 설정</button>
     <div class="fx-badge">
       <div class="fx-dot"></div>
@@ -1388,12 +1387,32 @@ async function loadAllPeriods(todayKey = activeKstTradingDateStr()) {
   el.textContent='';
 }
 
+function getPeriodDateLabel(key) {
+  const now = new Date();
+  const fmt = d => `${d.getMonth()+1}/${d.getDate()}`;
+  if (key === 'cost') return '';
+  if (key === '1d') {
+    const d = new Date(now);
+    d.setDate(d.getDate() - 1);
+    while (d.getDay() === 0 || d.getDay() === 6) d.setDate(d.getDate() - 1);
+    return fmt(d);
+  }
+  const d = new Date(now);
+  if (key === '1w')  d.setDate(d.getDate() - 7);
+  if (key === '1m')  d.setMonth(d.getMonth() - 1);
+  if (key === '3m')  d.setMonth(d.getMonth() - 3);
+  if (key === 'ytd') return `${now.getFullYear()}/1/1`;
+  return fmt(d) + '~';
+}
 function renderPeriodTables() {
   const chartData = PERIODS.map(p => {
     const { gain, pct, hasData } = calcPeriodGain(p.key);
-    return { label: p.label, gain: hasData ? gain : 0, pct: (hasData && pct !== null) ? pct : null, hasData };
+    return { label: p.label, key: p.key, gain: hasData ? gain : 0, pct: (hasData && pct !== null) ? pct : null, hasData };
   });
-  const thead = `<thead><tr><th>구분</th>${chartData.map(x=>`<th>${x.label}</th>`).join('')}</tr></thead>`;
+  const thead = `<thead><tr><th>구분</th>${chartData.map(x=>{
+    const date = getPeriodDateLabel(x.key);
+    return `<th>${x.label}${date?`<div style="font-size:9px;color:var(--muted);font-weight:400;margin-top:1px">${date}</div>`:''}`;
+  }).join('')}</tr></thead>`;
   const gainRow = `<tr><td>기간별 손익 (억원)</td>${chartData.map(x=>{
     if (!x.hasData) return '<td>—</td>';
     return `<td class="${x.gain>=0?'up':'down'}">${x.gain>=0?'+':''}${fmtOk(Math.abs(x.gain))}</td>`;
@@ -2345,43 +2364,6 @@ function removeBenchmark(i) {
 
 function openBenchmarkSettings() { openSettings(); }
 
-// ══════════════════════════════════════════
-//  AUTO REFRESH
-// ══════════════════════════════════════════
-const AUTO_REFRESH_SEC = 60; // 1분
-let autoRefreshRemaining = AUTO_REFRESH_SEC;
-let autoRefreshTimer = null;
-let countdownTimer = null;
-
-function startAutoRefresh() {
-  clearInterval(autoRefreshTimer);
-  clearInterval(countdownTimer);
-  autoRefreshRemaining = AUTO_REFRESH_SEC;
-  updateCountdown();
-  countdownTimer = setInterval(() => {
-    autoRefreshRemaining--;
-    updateCountdown();
-    if (autoRefreshRemaining <= 0) {
-      autoRefreshRemaining = AUTO_REFRESH_SEC;
-      refreshAll();
-    }
-  }, 1000);
-}
-
-function updateCountdown() {
-  const el = document.getElementById('autoRefreshCountdown');
-  if (!el) return;
-  const m = Math.floor(autoRefreshRemaining / 60);
-  const s = autoRefreshRemaining % 60;
-  el.textContent = `자동 갱신 ${m}:${String(s).padStart(2,'0')}`;
-}
-
-// 수동 새로고침 시 카운트다운 초기화
-const _origRefreshAll = refreshAll;
-refreshAll = async function() {
-  autoRefreshRemaining = AUTO_REFRESH_SEC;
-  await _origRefreshAll();
-};
 
 // ══════════════════════════════════════════
 //  INIT
@@ -2394,7 +2376,6 @@ document.getElementById('dashDate').textContent=new Date().toLocaleDateString('k
   const synced = await loadSyncedState();
   if (synced) renderAll();
   refreshAll();
-  startAutoRefresh();
 })();
 </script>
 </body>
