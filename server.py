@@ -428,43 +428,7 @@ def _fdr_price_data(ticker):
 
 def get_price_data(ticker):
     ticker = _normalize_ticker(ticker)
-    # 1순위: yfinance
-    try:
-        hist = yf.Ticker(ticker).history(period='10d', interval='1d', auto_adjust=False)
-        if hist is not None and not hist.empty and 'Close' in hist.columns:
-            close = hist['Close'].dropna()
-            if close is not None and len(close) >= 1:
-                if getattr(close.index, 'tz', None) is not None:
-                    close.index = close.index.tz_localize(None)
-                close = _latest_market_close(close)
-                if close is not None and len(close) >= 1:
-                    price = float(close.iloc[-1])
-                    prev = float(close.iloc[-2]) if len(close) >= 2 else price
-                    change = price - prev
-                    change_pct = (change / prev * 100) if prev else 0
-                    currency = _infer_currency(ticker)
-                    return {
-                        'price': round(price, 6),
-                        'change': round(change, 6),
-                        'changePct': round(change_pct, 4),
-                        'name': ticker,
-                        'currency': currency,
-                        'ok': True,
-                    }
-    except Exception:
-        pass
-
-    # 2순위: Yahoo Finance chart API
-    yahoo_result = _yahoo_price_data(ticker)
-    if yahoo_result is not None:
-        return yahoo_result
-
-    # 3순위: Alpha Vantage Daily 기반 전일 종가
-    fdr_result = _fdr_price_data(ticker)
-    if fdr_result is not None:
-        return fdr_result
-
-    # 4순위: Global Quote (응답 축소 시)
+    # 1순위: Alpha Vantage GLOBAL_QUOTE (실시간 우선)
     try:
         alpha_symbol = _ticker_to_alpha_symbol(ticker)
         data = _alpha_vantage_query({'function': 'GLOBAL_QUOTE', 'symbol': alpha_symbol})
@@ -487,6 +451,49 @@ def get_price_data(ticker):
                 }
     except Exception:
         pass
+
+    # 2순위: Alpha Vantage TIME_SERIES_INTRADAY (GLOBAL_QUOTE 미지원 심볼 폴백)
+    try:
+        alpha_symbol = _ticker_to_alpha_symbol(ticker)
+        data = _alpha_vantage_query({
+            'function': 'TIME_SERIES_INTRADAY',
+            'symbol': alpha_symbol,
+            'interval': '5min',
+            'outputsize': 'compact',
+        })
+        series = data.get('Time Series (5min)') if isinstance(data, dict) else None
+        if isinstance(series, dict) and series:
+            points = []
+            for ts, values in series.items():
+                if not isinstance(values, dict):
+                    continue
+                close_val = _to_float(values.get('4. close'))
+                if close_val > 0:
+                    points.append((pd.to_datetime(ts), close_val))
+            if points:
+                points.sort(key=lambda x: x[0])
+                price = float(points[-1][1])
+                prev = float(points[-2][1]) if len(points) >= 2 else price
+                change = price - prev
+                change_pct = (change / prev * 100) if prev else 0
+                exchange = alpha_symbol.split('.')[-1] if '.' in alpha_symbol else 'US'
+                currency = EXCHANGE_CURRENCY.get(exchange, _infer_currency(ticker))
+                return {
+                    'price': round(price, 6),
+                    'change': round(change, 6),
+                    'changePct': round(change_pct, 4),
+                    'name': ticker,
+                    'currency': currency,
+                    'ok': True,
+                }
+    except Exception:
+        pass
+
+    # 3순위: Alpha Vantage Daily (전일 기준)
+    fdr_result = _fdr_price_data(ticker)
+    if fdr_result is not None:
+        return fdr_result
+
     return None
 
 
@@ -1059,32 +1066,39 @@ def search_ticker():
             })
         return jsonify({'items': quick_items})
 
-    # 1순위: Alpha Vantage SYMBOL_SEARCH
-    data = _alpha_vantage_query({'function': 'SYMBOL_SEARCH', 'keywords': query})
-    if data and isinstance(data.get('bestMatches'), list):
+    # 1순위: Yahoo Finance 검색 (종목 추가 자동완성 기준)
+    try:
+        resp = requests.get(
+            'https://query2.finance.yahoo.com/v1/finance/search',
+            params={'q': query, 'quotesCount': 20, 'newsCount': 0,
+                    'enableFuzzyQuery': 'true', 'lang': 'en-US'},
+            timeout=6
+        )
+        resp.raise_for_status()
+        quotes = resp.json().get('quotes', []) or []
         items = []
-        for item in data.get('bestMatches', []):
-            symbol = (item.get('1. symbol') or '').strip().upper()
+        for q in quotes:
+            symbol = (q.get('symbol') or '').strip().upper()
             if not symbol:
                 continue
-            region = (item.get('4. region') or '').strip()
-            item_type = (item.get('3. type') or '').strip().upper()
-            yf_symbol = _alpha_symbol_to_yf(symbol)
-            exchange = symbol.rsplit('.', 1)[-1] if '.' in symbol else (region or 'US')
-            currency = EXCHANGE_CURRENCY.get(exchange, (item.get('8. currency') or 'USD').upper())
+            qtype = (q.get('quoteType') or '').upper()
+            if qtype and qtype not in {'EQUITY', 'ETF', 'INDEX'}:
+                continue
             items.append({
-                'symbol': yf_symbol,
-                'name': item.get('2. name') or symbol,
-                'exchange': region or exchange,
-                'currency': currency,
-                'type': item_type or 'EQUITY',
+                'symbol': symbol,
+                'name': q.get('longname') or q.get('shortname') or symbol,
+                'exchange': q.get('exchDisp') or q.get('exchange') or '',
+                'currency': (q.get('currency') or '').upper(),
+                'type': qtype or '',
             })
             if len(items) >= 10:
                 break
         if items:
             return jsonify({'items': items})
+    except Exception:
+        pass
 
-    # 2순위: 한국 주식 코드/한글 검색 (FDR KRX 상장종목)
+    # 2순위: 한국 주식 코드/한글 검색 (FDR KRX 상장종목 폴백)
     # 예) 005930, 삼성, 카카오
     is_korean_hint = any('\uac00' <= ch <= '\ud7a3' for ch in query) or q_digits != ''
     if is_korean_hint:
@@ -1123,34 +1137,31 @@ def search_ticker():
         except Exception:
             pass
 
-    # 3순위: Yahoo Finance 검색 (폴백)
-    try:
-        resp = requests.get(
-            'https://query2.finance.yahoo.com/v1/finance/search',
-            params={'q': query, 'quotesCount': 12, 'newsCount': 0,
-                    'enableFuzzyQuery': 'true', 'lang': 'en-US'},
-            timeout=6
-        )
-        resp.raise_for_status()
-        quotes = resp.json().get('quotes', []) or []
+    # 3순위: Alpha Vantage SYMBOL_SEARCH 폴백
+    data = _alpha_vantage_query({'function': 'SYMBOL_SEARCH', 'keywords': query})
+    if data and isinstance(data.get('bestMatches'), list):
         items = []
-        for q in quotes:
-            symbol = (q.get('symbol') or '').strip().upper()
+        for item in data.get('bestMatches', []):
+            symbol = (item.get('1. symbol') or '').strip().upper()
             if not symbol:
                 continue
-            qtype = (q.get('quoteType') or '').upper()
-            if qtype and qtype not in {'EQUITY', 'ETF', 'INDEX'}:
-                continue
+            region = (item.get('4. region') or '').strip()
+            item_type = (item.get('3. type') or '').strip().upper()
+            yf_symbol = _alpha_symbol_to_yf(symbol)
+            exchange = symbol.rsplit('.', 1)[-1] if '.' in symbol else (region or 'US')
+            currency = EXCHANGE_CURRENCY.get(exchange, (item.get('8. currency') or 'USD').upper())
             items.append({
-                'symbol': symbol,
-                'name': q.get('longname') or q.get('shortname') or symbol,
-                'exchange': q.get('exchDisp') or q.get('exchange') or '',
-                'currency': (q.get('currency') or '').upper(),
-                'type': qtype or '',
+                'symbol': yf_symbol,
+                'name': item.get('2. name') or symbol,
+                'exchange': region or exchange,
+                'currency': currency,
+                'type': item_type or 'EQUITY',
             })
-        return jsonify({'items': items[:10]})
-    except Exception:
-        return jsonify({'items': []})
+            if len(items) >= 10:
+                break
+        return jsonify({'items': items})
+
+    return jsonify({'items': []})
 
 
 @app.route('/api/portfolio/metrics', methods=['POST'])

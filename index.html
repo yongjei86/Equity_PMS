@@ -1129,7 +1129,7 @@ async function refreshAll(options = {}) {
   if (!suppressStatus) {
     const failedCount = Object.values(pm).filter(r => !r.ok).length;
     if (failedCount > 0 && failedCount === Object.keys(pm).length) {
-      showStatus('가격 업데이트 실패 - Yahoo Finance API 연결을 확인하세요', true);
+      showStatus('가격 업데이트 실패 - Alpha Vantage 또는 Supabase 데이터를 확인하세요', true);
     } else if (failedCount > 0) {
       showStatus(`가격 업데이트 완료 (${failedCount}개 종목 실패)`);
     } else {
