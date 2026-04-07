@@ -835,6 +835,7 @@ let snewsHistoryChart = null;
 const DEFAULT_SUPABASE_URL = 'https://iewzhfnalpqvlyaehvnq.supabase.co';
 const DEFAULT_SUPABASE_KEY = 'sb_publishable_jew0PizzOC9CBB7_APnSzg_lE1i1yrP';
 const SUPABASE_CONFIG_STORAGE_KEY = 'supabaseClientConfig';
+const STATE_CACHE_STORAGE_KEY = 'portfolioStateCacheV1';
 let supabaseClientConfig = loadSupabaseConfig();
 
 // Stock news panel state
@@ -867,6 +868,42 @@ function persistSupabaseConfig(config) {
 
 function hasSupabaseConfig() {
   return !!(supabaseClientConfig.url && supabaseClientConfig.apiKey);
+}
+
+function buildBackendHeaders(extraHeaders = {}) {
+  return {
+    ...extraHeaders,
+    'X-Sb-Url': supabaseClientConfig.url || '',
+    'X-Sb-Key': supabaseClientConfig.apiKey || '',
+  };
+}
+
+function backendFetch(url, options = {}) {
+  const merged = { ...options };
+  merged.headers = buildBackendHeaders(options.headers || {});
+  return fetch(url, merged);
+}
+
+function loadCachedState() {
+  try {
+    const raw = localStorage.getItem(STATE_CACHE_STORAGE_KEY);
+    if (!raw) return false;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || !parsed.state) return false;
+    applyStateSnapshot(parsed.state);
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+function saveCachedState() {
+  try {
+    localStorage.setItem(STATE_CACHE_STORAGE_KEY, JSON.stringify({
+      updatedAt: Date.now(),
+      state: getStateSnapshot(),
+    }));
+  } catch (e) {}
 }
 
 function openSupabaseSetup() {
@@ -987,7 +1024,7 @@ async function syncStateToServer() {
   try {
     const r = await fetch(`${BACKEND_URL}/api/portfolio/state`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: buildBackendHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ key: PORTFOLIO_SYNC_KEY, state: getStateSnapshot() })
     });
     return r.ok;
@@ -997,6 +1034,7 @@ async function syncStateToServer() {
 }
 
 function saveAllState() {
+  saveCachedState();
   syncStateToServer().then(ok => {
     if (!ok) showStatus('Supabase 동기화 실패: 서버 연결 상태를 확인하세요', true);
   });
@@ -1005,7 +1043,7 @@ function saveAllState() {
 async function loadSyncedState() {
   if (!BACKEND_URL) return false;
   try {
-    const r = await fetch(`${BACKEND_URL}/api/portfolio/state?key=${encodeURIComponent(PORTFOLIO_SYNC_KEY)}`);
+    const r = await backendFetch(`${BACKEND_URL}/api/portfolio/state?key=${encodeURIComponent(PORTFOLIO_SYNC_KEY)}`);
     if (!r.ok) return false;
     const j = await r.json();
     if (!j.ok || !j.state) return false;
@@ -1027,7 +1065,7 @@ async function saveDailySnapshot() {
   try {
     const snapshotDate = getKSTSnapshotDate();
     if (latestDailySnapshotDate === snapshotDate) return true;
-    const r = await fetch(`${BACKEND_URL}/api/portfolio/daily/snapshot`, {
+    const r = await backendFetch(`${BACKEND_URL}/api/portfolio/daily/snapshot`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -1054,7 +1092,7 @@ async function fetchPrice(ticker) {
   try {
     const ctrl = new AbortController();
     const t = setTimeout(() => ctrl.abort(), 5000);
-    const r = await fetch(`${BACKEND_URL}/api/market/prices?key=${encodeURIComponent(PORTFOLIO_SYNC_KEY)}&tickers=${encodeURIComponent(ticker)}`, { signal: ctrl.signal });
+    const r = await backendFetch(`${BACKEND_URL}/api/market/prices?key=${encodeURIComponent(PORTFOLIO_SYNC_KEY)}&tickers=${encodeURIComponent(ticker)}`, { signal: ctrl.signal });
     clearTimeout(t);
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const j = await r.json();
@@ -1094,7 +1132,7 @@ async function fetchTickerSuggestions(query) {
   const signal = tickerSuggestAbort.signal;
   if (BACKEND_URL) {
     try {
-      const r = await fetch(`${BACKEND_URL}/api/search?q=${encodeURIComponent(query)}`, { signal });
+      const r = await backendFetch(`${BACKEND_URL}/api/search?q=${encodeURIComponent(query)}`, { signal });
       if (r.ok) {
         const j = await r.json();
         return Array.isArray(j.items) ? j.items : [];
@@ -1116,7 +1154,7 @@ async function refreshAll(options = {}) {
     try {
       const ctrl = new AbortController();
       const t = setTimeout(() => ctrl.abort(), 15000);
-      const r = await fetch(`${BACKEND_URL}/api/market/prices?key=${encodeURIComponent(PORTFOLIO_SYNC_KEY)}&tickers=${encodeURIComponent(tickers.join(','))}`, { signal: ctrl.signal });
+      const r = await backendFetch(`${BACKEND_URL}/api/market/prices?key=${encodeURIComponent(PORTFOLIO_SYNC_KEY)}&tickers=${encodeURIComponent(tickers.join(','))}`, { signal: ctrl.signal });
       clearTimeout(t);
       if (r.ok) {
         const j = await r.json();
@@ -1278,7 +1316,7 @@ async function fetchSp500StartPrice(rangeKey) {
   if (!range) return null;
   if (BACKEND_URL) {
     try {
-      const r = await fetch(`${BACKEND_URL}/api/history/${encodeURIComponent('^GSPC')}?range=${range}`);
+      const r = await backendFetch(`${BACKEND_URL}/api/history/${encodeURIComponent('^GSPC')}?range=${range}`);
       if (r.ok) {
         const j = await r.json();
         if (j.startPrice) {
@@ -1341,7 +1379,7 @@ async function fetchPortfolioPeriodReturns() {
     return false;
   }
   try {
-    const r = await fetch(`${BACKEND_URL}/api/portfolio/period-returns?key=${encodeURIComponent(PORTFOLIO_SYNC_KEY)}`);
+    const r = await backendFetch(`${BACKEND_URL}/api/portfolio/period-returns?key=${encodeURIComponent(PORTFOLIO_SYNC_KEY)}`);
     if (!r.ok) {
       serverPeriodReturns = null;
       return false;
@@ -1728,7 +1766,7 @@ async function fetchStockNews(h) {
   // 1순위: 백엔드 서버에서 실제 Yahoo Finance 뉴스 가져오기
   if (BACKEND_URL) {
     try {
-      const r = await fetch(`${BACKEND_URL}/api/news/${encodeURIComponent(ticker)}`);
+      const r = await backendFetch(`${BACKEND_URL}/api/news/${encodeURIComponent(ticker)}`);
       if (r.ok) {
         const articles = await r.json();
         if (articles.length > 0) {
@@ -1914,7 +1952,7 @@ async function renderHoldingHistory() {
   const hint = document.getElementById('snewsHistoryHint');
   hint.textContent = '로딩 중...';
   try {
-    const r = await fetch(`${BACKEND_URL}/api/portfolio/daily/holdings?key=${encodeURIComponent(PORTFOLIO_SYNC_KEY)}&ticker=${encodeURIComponent(h.ticker)}&days=365`);
+    const r = await backendFetch(`${BACKEND_URL}/api/portfolio/daily/holdings?key=${encodeURIComponent(PORTFOLIO_SYNC_KEY)}&ticker=${encodeURIComponent(h.ticker)}&days=365`);
     const j = await r.json();
     const items = Array.isArray(j.items) ? j.items : [];
     const labels = items.map(x=>x.snapshot_date);
@@ -2415,7 +2453,7 @@ async function loadRiskMetrics() {
   grid.innerHTML = '<div class="empty-state" style="grid-column:1/-1">지표 계산 중...</div>';
   status.textContent = `${payload.period} / ${payload.benchmark} · ${baseDate}`;
   try {
-    const r = await fetch(`${BACKEND_URL}/api/portfolio/metrics`, {
+    const r = await backendFetch(`${BACKEND_URL}/api/portfolio/metrics`, {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
       body: JSON.stringify(payload)
@@ -2493,10 +2531,14 @@ let appInitialized = false;
 async function initializeApp() {
   if (appInitialized) return;
   appInitialized = true;
+  loadCachedState();
+  renderAll();
   // 데이터 소스는 Supabase 단일 경로 사용
   const synced = await loadSyncedState();
   if (!synced) {
     showStatus('Supabase 상태를 불러오지 못했습니다. 서버 설정을 확인하세요.', true);
+  } else {
+    saveCachedState();
   }
   if (!appSettings.benchmarks) appSettings.benchmarks = [
     {ticker:'^GSPC', name:'S&P 500', color:'#6b7280'},
