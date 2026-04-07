@@ -77,7 +77,37 @@ def _normalize_ticker(raw: str) -> str:
         return ""
     if tk.isdigit() and len(tk) == 6:
         return f"{tk}.KS"
+    if "." in tk and not tk.startswith("^"):
+        # Yahoo Finance는 일부 종목(예: BRK.B)을 하이픈 표기(BRK-B)로만 인식한다.
+        base, suffix = tk.rsplit(".", 1)
+        if suffix in {"A", "B", "C", "D"} and base:
+            return f"{base}-{suffix}"
     return tk
+
+
+def _ticker_candidates(raw_ticker: str) -> List[str]:
+    normalized = _normalize_ticker(raw_ticker)
+    if not normalized:
+        return []
+
+    candidates: List[str] = [normalized]
+
+    if "-" in normalized and not normalized.startswith("^"):
+        candidates.append(normalized.replace("-", "."))
+    if "." in normalized and not normalized.startswith("^"):
+        candidates.append(normalized.replace(".", "-"))
+
+    if normalized.isdigit() and len(normalized) == 6:
+        candidates.append(f"{normalized}.KS")
+
+    uniq: List[str] = []
+    seen = set()
+    for tk in candidates:
+        t = (tk or "").strip().upper()
+        if t and t not in seen:
+            seen.add(t)
+            uniq.append(t)
+    return uniq
 
 
 def _to_krw(amount: float, currency: str, fx_rates: Dict[str, float], usd_krw: float) -> float:
@@ -115,9 +145,10 @@ def _fetch_prev_close_from_supabase(ticker: str) -> Optional[Dict[str, Any]]:
 
 
 def _fetch_price_single(raw_ticker: str) -> Dict[str, Any]:
-    ticker = _normalize_ticker(raw_ticker)
-    if not ticker:
+    candidates = _ticker_candidates(raw_ticker)
+    if not candidates:
         return {"ok": False, "price": 0, "change": 0, "changePct": 0, "name": raw_ticker or "", "currency": "USD"}
+    ticker = candidates[0]
 
     now = time.time()
     cached = _LIVE_PRICE_CACHE.get(ticker)
@@ -126,33 +157,35 @@ def _fetch_price_single(raw_ticker: str) -> Dict[str, Any]:
 
     result = {"ok": False, "price": 0, "change": 0, "changePct": 0, "name": ticker, "currency": "USD"}
 
-    try:
-        yf_ticker = yf.Ticker(ticker)
-        hist = yf_ticker.history(period="5d", interval="1d", auto_adjust=False)
-        info = yf_ticker.fast_info or {}
+    for candidate in candidates:
+        try:
+            yf_ticker = yf.Ticker(candidate)
+            hist = yf_ticker.history(period="5d", interval="1d", auto_adjust=False)
+            info = yf_ticker.fast_info or {}
 
-        currency = str(info.get("currency") or "USD")
-        name = str(info.get("shortName") or info.get("longName") or ticker)
+            currency = str(info.get("currency") or "USD")
+            name = str(info.get("shortName") or info.get("longName") or candidate)
 
-        closes = []
-        if hist is not None and not hist.empty:
-            closes = [float(x) for x in hist["Close"].dropna().tolist() if x is not None]
+            closes = []
+            if hist is not None and not hist.empty:
+                closes = [float(x) for x in hist["Close"].dropna().tolist() if x is not None]
 
-        if closes:
-            price = closes[-1]
-            prev = closes[-2] if len(closes) >= 2 else price
-            change = price - prev
-            change_pct = (change / prev * 100.0) if prev else 0.0
-            result = {
-                "ok": True,
-                "price": round(price, 6),
-                "change": round(change, 6),
-                "changePct": round(change_pct, 6),
-                "name": name,
-                "currency": currency,
-            }
-        else:
-            sb_prev = _fetch_prev_close_from_supabase(ticker)
+            if closes:
+                price = closes[-1]
+                prev = closes[-2] if len(closes) >= 2 else price
+                change = price - prev
+                change_pct = (change / prev * 100.0) if prev else 0.0
+                result = {
+                    "ok": True,
+                    "price": round(price, 6),
+                    "change": round(change, 6),
+                    "changePct": round(change_pct, 6),
+                    "name": name,
+                    "currency": currency,
+                }
+                ticker = candidate
+                break
+            sb_prev = _fetch_prev_close_from_supabase(candidate)
             if sb_prev:
                 cp = _safe_float(sb_prev.get("close_price"), 0)
                 ch = _safe_float(sb_prev.get("change"), 0)
@@ -164,19 +197,11 @@ def _fetch_price_single(raw_ticker: str) -> Dict[str, Any]:
                     "name": name,
                     "currency": currency,
                 }
-    except Exception:
-        sb_prev = _fetch_prev_close_from_supabase(ticker)
-        if sb_prev:
-            cp = _safe_float(sb_prev.get("close_price"), 0)
-            ch = _safe_float(sb_prev.get("change"), 0)
-            result = {
-                "ok": cp > 0,
-                "price": cp,
-                "change": ch,
-                "changePct": _safe_float(sb_prev.get("change_pct"), 0),
-                "name": ticker,
-                "currency": "USD",
-            }
+                ticker = candidate
+                if result["ok"]:
+                    break
+        except Exception:
+            continue
 
     _LIVE_PRICE_CACHE[ticker] = {"ts": now, "value": result}
     return result
