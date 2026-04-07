@@ -832,6 +832,8 @@ const COLORS = ['#3b82f6','#22c55e','#f59e0b','#ef4444','#8b5cf6','#06b6d4','#f9
 let tickerSuggestAbort = null;
 let dragHoldingId = null;
 let snewsHistoryChart = null;
+const DEFAULT_SUPABASE_URL = 'https://iewzhfnalpqvlyaehvnq.supabase.co';
+const DEFAULT_SUPABASE_KEY = 'sb_publishable_jew0PizzOC9CBB7_APnSzg_lE1i1yrP';
 const SUPABASE_CONFIG_STORAGE_KEY = 'supabaseClientConfig';
 let supabaseClientConfig = loadSupabaseConfig();
 
@@ -844,14 +846,14 @@ let snewsActiveTab = 'news';
 function loadSupabaseConfig() {
   try {
     const raw = localStorage.getItem(SUPABASE_CONFIG_STORAGE_KEY);
-    if (!raw) return { url:'', apiKey:'' };
+    if (!raw) return { url: DEFAULT_SUPABASE_URL, apiKey: DEFAULT_SUPABASE_KEY };
     const parsed = JSON.parse(raw);
     return {
-      url: (parsed?.url || '').trim(),
-      apiKey: (parsed?.apiKey || '').trim(),
+      url: (parsed?.url || DEFAULT_SUPABASE_URL).trim(),
+      apiKey: (parsed?.apiKey || DEFAULT_SUPABASE_KEY).trim(),
     };
   } catch (e) {
-    return { url:'', apiKey:'' };
+    return { url: DEFAULT_SUPABASE_URL, apiKey: DEFAULT_SUPABASE_KEY };
   }
 }
 
