@@ -21,6 +21,7 @@ SUPABASE_SERVICE_ROLE_KEY = (
     or ''
 )
 
+
 # 거래소 코드 → 통화 매핑
 EXCHANGE_CURRENCY = {
     'KS': 'KRW', 'KQ': 'KRW', 'KRX': 'KRW',
@@ -53,6 +54,50 @@ PREV_CLOSE_CACHE_TTL_SECONDS = 20
 _PREV_CLOSE_CACHE = {}
 LIVE_PRICE_CACHE_TTL_SECONDS = 5
 _LIVE_PRICE_CACHE = {}
+
+
+
+def _decode_jwt_payload(token):
+    token = (token or '').strip()
+    parts = token.split('.')
+    if len(parts) != 3:
+        return None
+    try:
+        import base64
+        padded = parts[1] + '=' * (-len(parts[1]) % 4)
+        raw = base64.urlsafe_b64decode(padded.encode('utf-8')).decode('utf-8')
+        import json
+        payload = json.loads(raw)
+        return payload if isinstance(payload, dict) else None
+    except Exception:
+        return None
+
+
+def _supabase_config_error():
+    if not SUPABASE_URL:
+        return 'SUPABASE_URL 환경변수가 설정되지 않았습니다.'
+    key = (SUPABASE_SERVICE_ROLE_KEY or '').strip()
+    if not key:
+        return 'SUPABASE_SERVICE_ROLE_KEY(또는 SUPABASE_KEY) 환경변수가 설정되지 않았습니다.'
+
+    lowered = key.lower()
+    if lowered.startswith('sb_publishable_'):
+        return 'Supabase publishable 키는 서버 쓰기/삭제에 사용할 수 없습니다. SUPABASE_SERVICE_ROLE_KEY를 사용하세요.'
+
+    payload = _decode_jwt_payload(key)
+    if payload is not None:
+        role = str(payload.get('role') or '').strip().lower()
+        if role == 'anon':
+            return 'Supabase anon 키는 RLS로 인해 holdings/trades/watchlist 쓰기·삭제가 차단될 수 있습니다. SUPABASE_SERVICE_ROLE_KEY를 사용하세요.'
+        if role and role != 'service_role':
+            return f'Supabase role이 {role!r}로 감지되었습니다. 백엔드에는 service_role 키를 설정하세요.'
+
+    return None
+
+
+_initial_supabase_config_error = _supabase_config_error()
+if _initial_supabase_config_error:
+    print(f'[WARN] {_initial_supabase_config_error}')
 
 
 def _normalize_ticker(ticker):
@@ -518,7 +563,7 @@ def _fetch_live_prices(tickers):
 
 
 def _supabase_enabled():
-    return bool(SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY)
+    return _supabase_config_error() is None
 
 
 def _supabase_headers():
@@ -530,8 +575,9 @@ def _supabase_headers():
 
 
 def _supabase_request(method, path, *, params=None, payload=None, prefer=None):
-    if not _supabase_enabled():
-        return None, 'Supabase 환경변수가 설정되지 않았습니다.'
+    config_err = _supabase_config_error()
+    if config_err:
+        return None, config_err
     headers = _supabase_headers()
     if prefer:
         headers['Prefer'] = prefer
@@ -1130,7 +1176,7 @@ def portfolio_metrics():
 def get_portfolio_state():
     key = (request.args.get('key') or 'default').strip() or 'default'
     if not _supabase_enabled():
-        return jsonify({'ok': False, 'error': 'Supabase 환경변수가 설정되지 않았습니다.', 'state': None}), 503
+        return jsonify({'ok': False, 'error': _supabase_config_error() or 'Supabase 환경변수가 설정되지 않았습니다.', 'state': None}), 503
     state, err = _supabase_load_portfolio_state(key)
     if err:
         return jsonify({'ok': False, 'error': err, 'state': None}), 500
@@ -1230,7 +1276,7 @@ def set_portfolio_state():
         'appSettings': state.get('appSettings') if isinstance(state.get('appSettings'), dict) else {},
     }
     if not _supabase_enabled():
-        return jsonify({'ok': False, 'error': 'Supabase 환경변수가 설정되지 않았습니다.'}), 503
+        return jsonify({'ok': False, 'error': _supabase_config_error() or 'Supabase 환경변수가 설정되지 않았습니다.'}), 503
     err = _supabase_save_portfolio_state(key, safe_state)
     if err:
         return jsonify({'ok': False, 'error': err}), 500
