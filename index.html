@@ -1047,7 +1047,7 @@ async function saveDailySnapshot() {
 }
 
 async function fetchPrice(ticker) {
-  if (/^\d{6}$/.test(ticker)) ticker = `${ticker}.KS`;
+  ticker = normalizeTickerForQuote(ticker);
   if (!BACKEND_URL) return { price:0, change:0, changePct:0, name:ticker, currency:'USD', ok:false };
   try {
     const ctrl = new AbortController();
@@ -1062,6 +1062,23 @@ async function fetchPrice(ticker) {
     console.warn(`fetchPrice failed for ${ticker}:`, e);
   }
   return { price:0, change:0, changePct:0, name:ticker, currency:'USD', ok:false };
+}
+
+function normalizeTickerForQuote(rawTicker) {
+  const ticker = (rawTicker || '').trim().toUpperCase();
+  if (!ticker) return '';
+  if (/^\d{6}$/.test(ticker)) return `${ticker}.KS`;
+  if (ticker.includes(':') && !ticker.startsWith('^') && !ticker.includes('=X')) {
+    const [exchange, base] = ticker.split(':', 2);
+    if (/^\d{6}$/.test(base) && ['KRX', 'KOSPI', 'KO', 'KS'].includes(exchange)) return `${base}.KS`;
+    if (/^\d{6}$/.test(base) && ['KQ', 'KOSDAQ'].includes(exchange)) return `${base}.KQ`;
+    return `${base}.${exchange}`;
+  }
+  if (ticker.includes('.') && !ticker.startsWith('^') && !ticker.includes('=X')) {
+    const [base, exchange] = ticker.split('.', 2);
+    if (/^\d{6}$/.test(base) && ['KRX', 'KOSPI', 'KO'].includes(exchange)) return `${base}.KS`;
+  }
+  return ticker;
 }
 
 async function fetchFX() {
@@ -2040,7 +2057,7 @@ async function renderWatchlist(){
 function removeWatch(t){watchlist=watchlist.filter(x=>x!==t);saveAllState();renderWatchlist();}
 function openWatchModal(){document.getElementById('watchModalBackdrop').classList.add('open');document.getElementById('wTicker').value='';}
 async function addWatchItem(){
-  const t=document.getElementById('wTicker').value.trim().toUpperCase();
+  const t=normalizeTickerForQuote(document.getElementById('wTicker').value);
   if(!t||watchlist.includes(t)){document.getElementById('watchModalBackdrop').classList.remove('open');return;}
   watchlist.push(t);saveAllState();
   document.getElementById('watchModalBackdrop').classList.remove('open');renderWatchlist();
@@ -2198,7 +2215,7 @@ function _runTickerFetch(){
   },200);
   // ② 가격 조회: 700ms 디바운스, 자동완성 선택 후에만 의미 있음
   clearTimeout(priceTimeout);
-  const apiTicker=(_fullTicker||t).toUpperCase();
+  const apiTicker=normalizeTickerForQuote(_fullTicker||t);
   priceTimeout=setTimeout(async()=>{
     document.getElementById('fetchHint').textContent='조회 중...';
     const r=await fetchPrice(apiTicker);
@@ -2268,8 +2285,7 @@ function openModal(id=null){
 function closeModal(){document.getElementById('modalBackdrop').classList.remove('open');editId=null;_fullTicker=null;clearTimeout(tickerTimeout);clearTimeout(priceTimeout);}
 function closeModalOutside(e){if(e.target===document.getElementById('modalBackdrop'))closeModal();}
 async function saveHolding(){
-  let ticker=(_fullTicker||document.getElementById('fTicker').value.trim()).toUpperCase();
-  if (/^\d{6}$/.test(ticker)) ticker = `${ticker}.KS`;
+  let ticker=normalizeTickerForQuote(_fullTicker||document.getElementById('fTicker').value);
   const name=document.getElementById('fName').value.trim()||ticker;
   const avgPrice=parseFloat(document.getElementById('fPrice').value);
   const qty=parseFloat(document.getElementById('fQty').value);
