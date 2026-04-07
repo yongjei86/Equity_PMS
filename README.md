@@ -115,6 +115,15 @@ create table if not exists public.portfolio_settings (
 
 `publishable/anon` 키로는 `holdings`, `trades`, `watchlist` 쓰기/삭제가 RLS 정책에 의해 차단될 수 있으므로, 백엔드에서는 서비스 롤 키 사용을 권장합니다.
 
+최신 `server.py`는 시작 시/요청 시점에 아래 케이스를 자동 검사하고, 잘못된 키면 원인을 포함한 에러를 반환합니다.
+
+- `SUPABASE_URL` 누락
+- `SUPABASE_SERVICE_ROLE_KEY`(또는 `SUPABASE_KEY`) 누락
+- `sb_publishable_...` 키 사용
+- JWT role이 `anon` 또는 `service_role`이 아닌 키 사용
+
+즉, 백엔드 환경 변수는 반드시 **service_role 키**로 설정해야 합니다.
+
 ## 4) yfinance 전일 종가 → Supabase 적재 자동화
 
 `supabase-py` + `yfinance`를 사용하는 배치 스크립트가 추가되었습니다.
