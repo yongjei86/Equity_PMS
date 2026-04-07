@@ -1135,7 +1135,15 @@ async function fetchTickerSuggestions(query) {
       const r = await backendFetch(`${BACKEND_URL}/api/search?q=${encodeURIComponent(query)}`, { signal });
       if (r.ok) {
         const j = await r.json();
-        return Array.isArray(j.items) ? j.items : [];
+        if (!Array.isArray(j.items)) return [];
+        return j.items
+          .map((it) => ({
+            symbol: (it.symbol || it.ticker || '').toUpperCase(),
+            name: it.name || it.symbol || it.ticker || '',
+            exchange: it.exchange || '',
+            currency: (it.currency || '').toUpperCase()
+          }))
+          .filter((it) => !!it.symbol);
       }
     } catch (e) {}
   }
@@ -2189,7 +2197,7 @@ function closeTickerSuggest() {
   tickerSuggestFocusIndex = -1;
 }
 function applyTickerSuggestion(item) {
-  _fullTicker = item.symbol || '';
+  _fullTicker = item.symbol || item.ticker || '';
   const input = document.getElementById('fTicker');
   input.value = dispTicker(_fullTicker);
   if (item.name) document.getElementById('fName').value = item.name;
