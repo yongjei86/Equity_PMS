@@ -128,22 +128,6 @@ def _ticker_name(ticker: str) -> str:
         return ticker
 
 
-def _fetch_prev_close_from_supabase(ticker: str) -> Optional[Dict[str, Any]]:
-    try:
-        tk = quote(ticker)
-        r = _sb_request(
-            "GET",
-            f"market_prev_close?select=ticker,prev_close,close_price,change,change_pct,market_date&ticker=eq.{tk}&order=market_date.desc&limit=1",
-            timeout=8,
-        )
-        if not r.ok:
-            return None
-        rows = r.json() or []
-        return rows[0] if rows else None
-    except Exception:
-        return None
-
-
 def _fetch_price_single(raw_ticker: str) -> Dict[str, Any]:
     candidates = _ticker_candidates(raw_ticker)
     if not candidates:
@@ -185,21 +169,6 @@ def _fetch_price_single(raw_ticker: str) -> Dict[str, Any]:
                 }
                 ticker = candidate
                 break
-            sb_prev = _fetch_prev_close_from_supabase(candidate)
-            if sb_prev:
-                cp = _safe_float(sb_prev.get("close_price"), 0)
-                ch = _safe_float(sb_prev.get("change"), 0)
-                result = {
-                    "ok": cp > 0,
-                    "price": cp,
-                    "change": ch,
-                    "changePct": _safe_float(sb_prev.get("change_pct"), 0),
-                    "name": name,
-                    "currency": currency,
-                }
-                ticker = candidate
-                if result["ok"]:
-                    break
         except Exception:
             continue
 
@@ -307,7 +276,7 @@ def news_for_ticker(ticker: str) -> Any:
 def _load_state_from_supabase(portfolio_key: str) -> Dict[str, Any]:
     holdings_r = _sb_request(
         "GET",
-        f"holdings?select=holding_id,ticker,name,avg_price,qty,currency,sector,current,change,change_pct,sort_order&portfolio_key=eq.{quote(portfolio_key)}&order=sort_order.asc",
+        f"holdings?select=holding_id,ticker,name,avg_price,qty,currency,sector,sort_order&portfolio_key=eq.{quote(portfolio_key)}&order=sort_order.asc",
     )
     trades_r = _sb_request(
         "GET",
@@ -335,9 +304,9 @@ def _load_state_from_supabase(portfolio_key: str) -> Dict[str, Any]:
             "qty": _safe_float(row.get("qty"), 0),
             "currency": row.get("currency") or "USD",
             "sector": row.get("sector") or "",
-            "current": _safe_float(row.get("current"), 0),
-            "change": _safe_float(row.get("change"), 0),
-            "changePct": _safe_float(row.get("change_pct"), 0),
+            "current": 0,
+            "change": 0,
+            "changePct": 0,
         }
         for row in holdings_rows
     ]
@@ -422,9 +391,6 @@ def post_portfolio_state() -> Any:
                 "qty": _safe_float(h.get("qty"), 0),
                 "currency": (h.get("currency") or "USD").upper(),
                 "sector": h.get("sector") or "",
-                "current": _safe_float(h.get("current"), 0),
-                "change": _safe_float(h.get("change"), 0),
-                "change_pct": _safe_float(h.get("changePct"), 0),
                 "sort_order": idx,
                 "updated_at": datetime.utcnow().isoformat(),
             }
