@@ -1143,13 +1143,13 @@ async function fetchTickerSuggestions(query) {
 }
 
 async function refreshAll(options = {}) {
-  const { persistSnapshot = true, suppressStatus = false } = options;
+  const { persistSnapshot = false, suppressStatus = false } = options;
   const icon = document.getElementById('refreshIcon');
   icon.classList.add('spin');
   const tickers = [...new Set([...holdings.map(h=>h.ticker),...watchlist])];
   fetchFX();
   let pm = {};
-  // 하이브리드: 외부 API 실시간 우선 + Supabase 전일 종가 폴백
+  // 외부 API 실시간 시세 조회
   if (BACKEND_URL && tickers.length) {
     try {
       const ctrl = new AbortController();
@@ -1186,7 +1186,7 @@ async function refreshAll(options = {}) {
   if (!suppressStatus) {
     const failedCount = Object.values(pm).filter(r => !r.ok).length;
     if (failedCount > 0 && failedCount === Object.keys(pm).length) {
-      showStatus('가격 업데이트 실패 - Alpha Vantage 또는 Supabase 데이터를 확인하세요', true);
+      showStatus('가격 업데이트 실패 - 외부 시세 API 상태를 확인하세요', true);
     } else if (failedCount > 0) {
       showStatus(`가격 업데이트 완료 (${failedCount}개 종목 실패)`);
     } else {
