@@ -220,6 +220,15 @@ tr:hover td{background:rgba(255,255,255,0.02)}
 .status-bar.error .status-dot{background:var(--red)}
 .status-dot{width:7px;height:7px;border-radius:50%;background:var(--green)}
 
+/* ── FIRST-TIME SUPABASE SETUP ── */
+.setup-backdrop{display:none;position:fixed;inset:0;background:rgba(0,0,0,0.78);z-index:700;align-items:center;justify-content:center;padding:20px}
+.setup-backdrop.open{display:flex}
+.setup-card{width:min(460px,95vw);background:var(--bg2);border:1px solid var(--border2);border-radius:var(--radius-lg);padding:24px}
+.setup-title{font-size:18px;font-weight:600;margin-bottom:8px}
+.setup-sub{font-size:12px;color:var(--muted);line-height:1.5;margin-bottom:16px}
+.setup-error{display:none;font-size:12px;color:var(--red);margin-top:6px}
+.setup-error.open{display:block}
+
 /* ── SEARCH ── */
 .search-wrap{position:relative}
 .search-input{padding:8px 10px 8px 32px;background:var(--bg);border:1px solid var(--border2);border-radius:var(--radius);color:var(--text);font-size:13px;width:180px;font-family:var(--font-sans);transition:border-color 0.15s}
@@ -776,6 +785,26 @@ tr:hover td{background:rgba(255,255,255,0.02)}
 
 <div class="status-bar" id="statusBar"><div class="status-dot"></div><span id="statusMsg"></span></div>
 
+<!-- FIRST-TIME SUPABASE SETUP -->
+<div class="setup-backdrop" id="supabaseSetupBackdrop">
+  <div class="setup-card">
+    <div class="setup-title">Supabase 연결 정보 입력</div>
+    <div class="setup-sub">처음 1회만 입력하면 브라우저 로컬 저장소에 저장되어 새로고침 후에도 그대로 유지됩니다.</div>
+    <div class="form-group">
+      <label class="form-label">Supabase URL</label>
+      <input class="form-input" id="sbUrlInput" placeholder="https://xxxx.supabase.co"/>
+    </div>
+    <div class="form-group" style="margin-bottom:8px">
+      <label class="form-label">Supabase API Key</label>
+      <input class="form-input" id="sbKeyInput" type="password" placeholder="sb_publishable_xxx 또는 anon key"/>
+    </div>
+    <div class="setup-error" id="sbSetupError">URL과 API Key를 모두 입력해주세요.</div>
+    <div class="modal-actions" style="margin-top:16px">
+      <button class="btn btn-primary" onclick="saveSupabaseConfigFromSetup()">저장하고 시작</button>
+    </div>
+  </div>
+</div>
+
 <script>
 // ══════════════════════════════════════════
 //  STATE
@@ -803,12 +832,64 @@ const COLORS = ['#3b82f6','#22c55e','#f59e0b','#ef4444','#8b5cf6','#06b6d4','#f9
 let tickerSuggestAbort = null;
 let dragHoldingId = null;
 let snewsHistoryChart = null;
+const SUPABASE_CONFIG_STORAGE_KEY = 'supabaseClientConfig';
+let supabaseClientConfig = loadSupabaseConfig();
 
 // Stock news panel state
 let snewsStockId = null;
 let snewsArticles = [];
 let snewsSummary = '';
 let snewsActiveTab = 'news';
+
+function loadSupabaseConfig() {
+  try {
+    const raw = localStorage.getItem(SUPABASE_CONFIG_STORAGE_KEY);
+    if (!raw) return { url:'', apiKey:'' };
+    const parsed = JSON.parse(raw);
+    return {
+      url: (parsed?.url || '').trim(),
+      apiKey: (parsed?.apiKey || '').trim(),
+    };
+  } catch (e) {
+    return { url:'', apiKey:'' };
+  }
+}
+
+function persistSupabaseConfig(config) {
+  supabaseClientConfig = {
+    url: (config?.url || '').trim(),
+    apiKey: (config?.apiKey || '').trim(),
+  };
+  localStorage.setItem(SUPABASE_CONFIG_STORAGE_KEY, JSON.stringify(supabaseClientConfig));
+}
+
+function hasSupabaseConfig() {
+  return !!(supabaseClientConfig.url && supabaseClientConfig.apiKey);
+}
+
+function openSupabaseSetup() {
+  document.getElementById('sbUrlInput').value = supabaseClientConfig.url || '';
+  document.getElementById('sbKeyInput').value = supabaseClientConfig.apiKey || '';
+  document.getElementById('sbSetupError').classList.remove('open');
+  document.getElementById('supabaseSetupBackdrop').classList.add('open');
+}
+
+function closeSupabaseSetup() {
+  document.getElementById('supabaseSetupBackdrop').classList.remove('open');
+}
+
+function saveSupabaseConfigFromSetup() {
+  const url = document.getElementById('sbUrlInput').value.trim();
+  const apiKey = document.getElementById('sbKeyInput').value.trim();
+  if (!url || !apiKey) {
+    document.getElementById('sbSetupError').classList.add('open');
+    return;
+  }
+  persistSupabaseConfig({ url, apiKey });
+  closeSupabaseSetup();
+  showStatus('Supabase 정보가 로컬에 저장되었습니다.');
+  initializeApp();
+}
 
 // ══════════════════════════════════════════
 //  FX / MONEY
@@ -2390,7 +2471,10 @@ function openBenchmarkSettings() { openSettings(); }
 //  INIT
 // ══════════════════════════════════════════
 document.getElementById('dashDate').textContent=new Date().toLocaleDateString('ko-KR',{year:'numeric',month:'long',day:'numeric',weekday:'long'});
-(async () => {
+let appInitialized = false;
+async function initializeApp() {
+  if (appInitialized) return;
+  appInitialized = true;
   // 데이터 소스는 Supabase 단일 경로 사용
   const synced = await loadSyncedState();
   if (!synced) {
@@ -2403,7 +2487,13 @@ document.getElementById('dashDate').textContent=new Date().toLocaleDateString('k
   renderAll();
   // 초기 진입 속도를 위해 배치 API만 백그라운드 갱신 (개별 폴백/스냅샷 저장 생략)
   refreshAll({ persistSnapshot:false, suppressStatus:true });
-})();
+}
+
+if (hasSupabaseConfig()) {
+  initializeApp();
+} else {
+  openSupabaseSetup();
+}
 </script>
 </body>
 </html>
