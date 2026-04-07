@@ -26,6 +26,8 @@ SUPABASE_SERVICE_ROLE_KEY = (
 
 LIVE_PRICE_CACHE_TTL_SECONDS = 20
 _LIVE_PRICE_CACHE: Dict[str, Dict[str, Any]] = {}
+ALPHAVANTAGE_API_KEY = (os.environ.get("ALPHAVANTAGE_API_KEY") or os.environ.get("ALPHA_VANTAGE_API_KEY") or "").strip()
+ALPHAVANTAGE_BASE_URL = "https://www.alphavantage.co/query"
 
 
 def _req_supabase_url() -> str:
@@ -120,6 +122,127 @@ def _to_krw(amount: float, currency: str, fx_rates: Dict[str, float], usd_krw: f
     return (amount / denom) * usd_krw
 
 
+def _alpha_vantage_get(params: Dict[str, str], timeout: int = 8) -> Optional[Dict[str, Any]]:
+    if not ALPHAVANTAGE_API_KEY:
+        return None
+    query = dict(params)
+    query["apikey"] = ALPHAVANTAGE_API_KEY
+    try:
+        resp = requests.get(ALPHAVANTAGE_BASE_URL, params=query, timeout=timeout)
+        if not resp.ok:
+            return None
+        data = resp.json()
+        if isinstance(data, dict) and data.get("Note"):
+            return None
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def _alpha_vantage_search(keyword: str, limit: int = 8) -> List[Dict[str, str]]:
+    data = _alpha_vantage_get({"function": "SYMBOL_SEARCH", "keywords": keyword})
+    if not data:
+        return []
+
+    matches = data.get("bestMatches") or []
+    items: List[Dict[str, str]] = []
+    for m in matches:
+        symbol = str(m.get("1. symbol") or "").strip().upper()
+        if not symbol:
+            continue
+        items.append(
+            {
+                "ticker": symbol,
+                "name": str(m.get("2. name") or symbol),
+                "exchange": str(m.get("4. region") or m.get("3. type") or "ALPHA_VANTAGE"),
+            }
+        )
+        if len(items) >= limit:
+            break
+    return items
+
+
+def _alpha_vantage_prev_close(ticker: str) -> Optional[Dict[str, Any]]:
+    data = _alpha_vantage_get({"function": "GLOBAL_QUOTE", "symbol": ticker})
+    if not data:
+        return None
+
+    quote_data = data.get("Global Quote")
+    if not isinstance(quote_data, dict):
+        return None
+
+    prev_close = _safe_float(quote_data.get("08. previous close"), 0.0)
+    if prev_close <= 0:
+        return None
+
+    name = ticker
+    overview = _alpha_vantage_get({"function": "OVERVIEW", "symbol": ticker}, timeout=6)
+    if overview and isinstance(overview, dict):
+        name = str(overview.get("Name") or ticker)
+
+    change = _safe_float(quote_data.get("09. change"), 0.0)
+    change_pct_raw = str(quote_data.get("10. change percent") or "0").replace("%", "").strip()
+    change_pct = _safe_float(change_pct_raw, 0.0)
+
+    return {
+        "ok": True,
+        "price": round(prev_close, 6),
+        "change": round(change, 6),
+        "changePct": round(change_pct, 6),
+        "name": name,
+        "currency": "USD",
+        "source": "alpha_vantage",
+    }
+
+
+def _yahoo_prev_close(ticker: str) -> Optional[Dict[str, Any]]:
+    try:
+        yf_ticker = yf.Ticker(ticker)
+        hist = yf_ticker.history(period="10d", interval="1d", auto_adjust=False)
+        info = yf_ticker.fast_info or {}
+
+        if hist is None or hist.empty:
+            return None
+
+        closes = [float(x) for x in hist["Close"].dropna().tolist() if x is not None]
+        if len(closes) < 2:
+            return None
+
+        prev_close = closes[-2]
+        before_prev = closes[-3] if len(closes) >= 3 else prev_close
+        change = prev_close - before_prev
+        change_pct = (change / before_prev * 100.0) if before_prev else 0.0
+
+        return {
+            "ok": True,
+            "price": round(prev_close, 6),
+            "change": round(change, 6),
+            "changePct": round(change_pct, 6),
+            "name": str(info.get("shortName") or info.get("longName") or ticker),
+            "currency": str(info.get("currency") or "USD"),
+            "source": "yahoo",
+        }
+    except Exception:
+        return None
+
+
+def _fetch_prev_close_price(raw_ticker: str) -> Dict[str, Any]:
+    candidates = _ticker_candidates(raw_ticker)
+    if not candidates:
+        return {"ok": False, "price": 0, "change": 0, "changePct": 0, "name": raw_ticker or "", "currency": "USD"}
+
+    for candidate in candidates:
+        alpha_data = _alpha_vantage_prev_close(candidate)
+        if alpha_data:
+            return alpha_data
+
+        yahoo_data = _yahoo_prev_close(candidate)
+        if yahoo_data:
+            return yahoo_data
+
+    return {"ok": False, "price": 0, "change": 0, "changePct": 0, "name": candidates[0], "currency": "USD"}
+
+
 def _ticker_name(ticker: str) -> str:
     try:
         info = yf.Ticker(ticker).fast_info or {}
@@ -139,38 +262,7 @@ def _fetch_price_single(raw_ticker: str) -> Dict[str, Any]:
     if cached and now - cached.get("ts", 0) < LIVE_PRICE_CACHE_TTL_SECONDS:
         return cached["value"]
 
-    result = {"ok": False, "price": 0, "change": 0, "changePct": 0, "name": ticker, "currency": "USD"}
-
-    for candidate in candidates:
-        try:
-            yf_ticker = yf.Ticker(candidate)
-            hist = yf_ticker.history(period="5d", interval="1d", auto_adjust=False)
-            info = yf_ticker.fast_info or {}
-
-            currency = str(info.get("currency") or "USD")
-            name = str(info.get("shortName") or info.get("longName") or candidate)
-
-            closes = []
-            if hist is not None and not hist.empty:
-                closes = [float(x) for x in hist["Close"].dropna().tolist() if x is not None]
-
-            if closes:
-                price = closes[-1]
-                prev = closes[-2] if len(closes) >= 2 else price
-                change = price - prev
-                change_pct = (change / prev * 100.0) if prev else 0.0
-                result = {
-                    "ok": True,
-                    "price": round(price, 6),
-                    "change": round(change, 6),
-                    "changePct": round(change_pct, 6),
-                    "name": name,
-                    "currency": currency,
-                }
-                ticker = candidate
-                break
-        except Exception:
-            continue
+    result = _fetch_prev_close_price(raw_ticker)
 
     _LIVE_PRICE_CACHE[ticker] = {"ts": now, "value": result}
     return result
@@ -188,11 +280,12 @@ def search_ticker() -> Any:
     if not q:
         return jsonify({"items": []})
 
-    items = []
+    items = _alpha_vantage_search(q, limit=8)
     try:
         tk = _normalize_ticker(q)
-        nm = _ticker_name(tk)
-        items.append({"ticker": tk, "name": nm, "exchange": "AUTO"})
+        if tk:
+            nm = _ticker_name(tk)
+            items.insert(0, {"ticker": tk, "name": nm, "exchange": "AUTO"})
     except Exception:
         pass
 
@@ -467,7 +560,8 @@ def save_daily_snapshot() -> Any:
     for h in holdings:
         qty = _safe_float(h.get("qty"), 0)
         avg = _safe_float(h.get("avgPrice"), 0)
-        cur = _safe_float(h.get("current"), avg)
+        prev_close_data = _fetch_prev_close_price(h.get("ticker") or "")
+        cur = _safe_float(prev_close_data.get("price"), avg) if prev_close_data.get("ok") else avg
         ccy = (h.get("currency") or "USD").upper()
 
         cost_krw = _to_krw(avg * qty, ccy, fx_rates, usd_krw)
